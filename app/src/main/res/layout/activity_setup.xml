@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="40dp">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:text="Link da lista M3U"
+                android:textColor="@color/accent"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="Cole o endereço que o seu fornecedor enviou. Exemplo: http://servidor.com/get.php?username=…&amp;password=…&amp;type=m3u_plus"
+                android:textColor="@color/text_dim"
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/url"
+                style="@style/Input"
+                android:hint="http://..."
+                android:imeOptions="actionDone"
+                android:inputType="textUri" />
+
+            <TextView
+                android:id="@+id/saveUrl"
+                style="@style/TabButton"
+                android:text="Salvar link" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="40dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:text="Ou entre com usuário e senha"
+                android:textColor="@color/accent"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="Para fornecedores que passam servidor, usuário e senha (padrão Xtream Codes)."
+                android:textColor="@color/text_dim"
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/server"
+                style="@style/Input"
+                android:hint="Servidor (ex.: http://servidor.com:8080)"
+                android:inputType="textUri" />
+
+            <EditText
+                android:id="@+id/user"
+                style="@style/Input"
+                android:hint="Usuário"
+                android:inputType="text" />
+
+            <EditText
+                android:id="@+id/pass"
+                style="@style/Input"
+                android:hint="Senha"
+                android:imeOptions="actionDone"
+                android:inputType="textPassword" />
+
+            <TextView
+                android:id="@+id/saveXtream"
+                style="@style/TabButton"
+                android:text="Entrar" />
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>
