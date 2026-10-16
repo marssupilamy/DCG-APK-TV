@@ -190,9 +190,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun render(lib: Library) {
-        tabs[Kind.LIVE]?.text = "TV ao Vivo (${lib.liveCount})"
-        tabs[Kind.MOVIE]?.text = "Filmes (${lib.movieCount})"
-        tabs[Kind.SERIES]?.text = "Séries (${lib.seriesCount})"
+        // As quantidades ficam nas categorias da coluna da esquerda, não nas abas, para a barra caber na tela.
         if (lib.isEmpty) setStatus("A lista não tem itens. Confira os dados em Configurar.")
         showSection(section)
         tabs[section]?.requestFocus()
