@@ -54,7 +54,18 @@ class GamesActivity : AppCompatActivity() {
             adapter = gameAdapter
             itemAnimator = null
         }
-        findViewById<View>(R.id.refresh).setOnClickListener { load(force = true) }
+        findViewById<View>(R.id.refresh).setOnClickListener {
+            val minutes = PlaylistRepository.agendaAgeMs() / 60_000
+            if (minutes < 10) {
+                android.widget.Toast.makeText(
+                    this,
+                    "A agenda foi atualizada há $minutes min. Para não sobrecarregar o servidor, espere 10 min entre atualizações.",
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
+            } else {
+                load(force = true)
+            }
+        }
 
         if (!PlaylistRepository.hasXtream(this)) {
             showMessage("A agenda de jogos usa a programação dos canais, disponível só em contas com servidor, usuário e senha.")

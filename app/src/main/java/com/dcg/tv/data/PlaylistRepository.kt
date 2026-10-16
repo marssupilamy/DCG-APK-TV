@@ -247,17 +247,16 @@ object PlaylistRepository {
     }
 
     /**
-     * Executa [block] no servidor em uso. Se ele falhar, tenta os outros servidores da conta
-     * e passa a usar o primeiro que funcionar.
+     * Executa [block] no servidor em uso. Se ele falhar, tenta os outros servidores da conta.
+     * Não troca o servidor principal: um servidor pode responder a consultas e não transmitir
+     * os canais da conta. Quem troca o principal é o login e o player, quando o vídeo abre.
      */
     private suspend fun <T> onAnyServer(ctx: Context, block: suspend (XtreamAccount, String) -> T): T {
         val (account, _) = session(ctx) ?: throw IOException("Conta não configurada")
         var last: Exception? = null
         for (server in servers(ctx)) {
             try {
-                val result = block(account, server)
-                if (server != prefs(ctx).getString(KEY_ACTIVE, null)) setActiveServer(ctx, server)
-                return result
+                return block(account, server)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -312,45 +311,58 @@ object PlaylistRepository {
         epgCache[cacheKey]?.let { (time, list) ->
             if (System.currentTimeMillis() - time < EPG_CACHE_MS) return list
         }
-        if (session(ctx) == null) return emptyList()
+        // Só no servidor em uso: a programação é consultada muitas vezes e não vale multiplicar pedidos.
+        val (account, server) = session(ctx) ?: return emptyList()
         return withContext(Dispatchers.IO) {
-            onAnyServer(ctx) { account, server ->
-                Epg.readListings(Net.fetchText(account.apiUrl(server, "get_short_epg", "&stream_id=$id&limit=$limit")).reader())
-            }.also { epgCache[cacheKey] = System.currentTimeMillis() to it }
+            Epg.readListings(Net.fetchText(account.apiUrl(server, "get_short_epg", "&stream_id=$id&limit=$limit")).reader())
+                .also { epgCache[cacheKey] = System.currentTimeMillis() to it }
         }
     }
 
     private var agendaCache: Pair<Long, Map<Sport, List<Game>>>? = null
 
+    /** Atualizar a agenda pede a programação de vários canais. Há um intervalo mínimo entre atualizações. */
+    fun agendaAgeMs(): Long = agendaCache?.let { System.currentTimeMillis() - it.first } ?: Long.MAX_VALUE
+
     /**
-     * Agenda de jogos: lê a programação dos canais de esporte, dez de cada vez.
-     * [progress] recebe quantos canais já foram lidos e o total.
+     * Agenda de jogos: lê a programação dos canais de esporte, poucos de cada vez e com pausa
+     * entre os pedidos, para o fornecedor não confundir com abuso e bloquear a conta.
+     * Para depois de várias falhas seguidas. [progress] recebe quantos canais já foram lidos e o total.
      */
     suspend fun agenda(ctx: Context, force: Boolean, progress: (Int, Int) -> Unit): Map<Sport, List<Game>> {
-        if (!force) agendaCache?.let { (time, agenda) -> if (System.currentTimeMillis() - time < AGENDA_CACHE_MS) return agenda }
+        if (!force || agendaAgeMs() < AGENDA_MIN_REFRESH_MS) {
+            agendaCache?.let { (time, agenda) -> if (System.currentTimeMillis() - time < AGENDA_CACHE_MS) return agenda }
+        }
         val lib = library ?: return emptyMap()
-        val channels = lib.live.asSequence()
-            .flatMap { it.items }
-            .filter(Sports::isSportsChannel)
+        val all = lib.live.asSequence().flatMap { it.items }.filter(Sports::isSportsChannel)
+        // Canais das categorias de esporte primeiro; depois os que só têm o nome parecido.
+        val (inSportsGroup, others) = all.toList().partition { Sports.isSportsGroup(it.group) }
+        val channels = (inSportsGroup + others)
             .distinctBy(Sports::channelKey)
             .take(MAX_AGENDA_CHANNELS)
-            .toList()
         val listings = java.util.Collections.synchronizedMap(LinkedHashMap<Entry, List<Program>>())
         val done = java.util.concurrent.atomic.AtomicInteger()
+        val failuresInRow = java.util.concurrent.atomic.AtomicInteger()
         progress(0, channels.size)
         withContext(Dispatchers.IO) {
-            channels.chunked(AGENDA_PARALLEL).forEach { chunk ->
+            for (chunk in channels.chunked(AGENDA_PARALLEL)) {
+                if (failuresInRow.get() >= AGENDA_MAX_FAILURES) break
                 chunk.map { channel ->
                     async {
                         try {
                             listings[channel] = programs(ctx, channel, limit = AGENDA_PROGRAMS)
+                            failuresInRow.set(0)
                         } catch (e: Exception) {
-                            // Canal sem programação: segue com os outros.
+                            failuresInRow.incrementAndGet()
                         }
                         progress(done.incrementAndGet(), channels.size)
                     }
                 }.awaitAll()
+                kotlinx.coroutines.delay(AGENDA_PAUSE_MS)
             }
+        }
+        if (listings.isEmpty() && failuresInRow.get() >= AGENDA_MAX_FAILURES) {
+            throw IOException("o servidor parou de responder à programação. Espere alguns minutos e tente de novo")
         }
         val agenda = Sports.buildAgenda(LinkedHashMap(listings), System.currentTimeMillis())
         agendaCache = System.currentTimeMillis() to agenda
@@ -359,7 +371,10 @@ object PlaylistRepository {
 
     private const val EPG_CACHE_MS = 15 * 60 * 1000L
     private const val AGENDA_CACHE_MS = 30 * 60 * 1000L
-    private const val MAX_AGENDA_CHANNELS = 200
-    private const val AGENDA_PARALLEL = 10
-    private const val AGENDA_PROGRAMS = 30
+    private const val MAX_AGENDA_CHANNELS = 60
+    private const val AGENDA_PARALLEL = 2
+    private const val AGENDA_PAUSE_MS = 250L
+    private const val AGENDA_MAX_FAILURES = 6
+    private const val AGENDA_PROGRAMS = 20
+    private const val AGENDA_MIN_REFRESH_MS = 10 * 60 * 1000L
 }

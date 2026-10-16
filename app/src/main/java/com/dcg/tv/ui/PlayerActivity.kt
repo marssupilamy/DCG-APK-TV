@@ -311,7 +311,13 @@ class PlayerActivity : AppCompatActivity() {
         var cause: Throwable? = e.cause
         while (cause != null) {
             if (cause is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) {
-                return Net.httpMessage(cause.responseCode).replaceFirstChar { it.uppercase() } + "."
+                val code = cause.responseCode
+                val hint = if (code in setOf(403, 404, 429, 458)) {
+                    "\nSe outros canais também falham, pode ser um bloqueio temporário do fornecedor por muitos acessos seguidos. Espere alguns minutos."
+                } else {
+                    ""
+                }
+                return Net.httpMessage(code).replaceFirstChar { it.uppercase() } + "." + hint
             }
             cause = cause.cause
         }

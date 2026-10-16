@@ -57,6 +57,11 @@ object Sports {
     /** Esportes em que o programa vale mesmo sem "Time A x Time B" no título. */
     private val EVENT_SPORTS = setOf(Sport.MOTOR, Sport.FIGHT, Sport.TENNIS)
 
+    fun isSportsGroup(group: String): Boolean {
+        val g = M3uParser.normalize(group)
+        return "esporte" in g || "sport" in g || "futebol" in g
+    }
+
     fun isSportsChannel(e: Entry): Boolean {
         val text = M3uParser.normalize(e.group + " " + e.name)
         return CHANNEL_WORDS.any { it in text }
