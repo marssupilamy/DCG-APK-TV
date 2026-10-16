@@ -79,6 +79,10 @@ class PlayerActivity : AppCompatActivity() {
     /** Tecla tratada aqui no ACTION_DOWN; o ACTION_UP dela também fica aqui. */
     private var consumedKey = KeyEvent.KEYCODE_UNKNOWN
 
+    /** Servidor usado nos links. Muda quando o atual falha e outro da conta funciona. */
+    private var playbackServer: String? = null
+    private var serverTries = 0
+
     /** Cabeçalhos extras no formato "link|User-Agent=...&Referer=...". */
     private val headers = HashMap<String, Map<String, String>>()
 
@@ -92,6 +96,7 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
         resumeIndex = (savedInstanceState?.getInt(KEY_INDEX) ?: PlayerQueue.start).coerceIn(items.indices)
+        playbackServer = PlaylistRepository.servers(this).firstOrNull()
         savedInstanceState?.getLong(KEY_POSITION, C.TIME_UNSET)?.let { resumePosition = it }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_player)
@@ -205,7 +210,8 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun toMediaItem(entry: Entry): MediaItem {
-        val parts = entry.url.split('|', limit = 2)
+        val url = playbackServer?.let { PlaylistRepository.withServer(this, entry.url, it) } ?: entry.url
+        val parts = url.split('|', limit = 2)
         val uri = parts[0].trim()
         if (parts.size == 2) {
             val extra = parts[1].split('&').mapNotNull { pair ->
@@ -230,6 +236,8 @@ class PlayerActivity : AppCompatActivity() {
                 val position = if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) lastDuration else lastPosition
                 UserData.saveProgress(previous.key, position, lastDuration)
             }
+            // Outro canal ou episódio: volta a poder tentar os outros servidores.
+            if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) serverTries = 0
             currentIndex = p.currentMediaItemIndex
             lastPosition = 0
             lastDuration = 0
@@ -244,7 +252,15 @@ class PlayerActivity : AppCompatActivity() {
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
-            if (isPlaying) error.isVisible = false
+            if (!isPlaying) return
+            error.isVisible = false
+            // Deu certo: se foi num servidor novo, ele passa a ser o principal.
+            serverTries = 0
+            playbackServer?.let { server ->
+                if (server != PlaylistRepository.servers(this@PlayerActivity).firstOrNull()) {
+                    PlaylistRepository.setActiveServer(this@PlayerActivity, server)
+                }
+            }
         }
 
         override fun onPlayerError(e: PlaybackException) {
@@ -254,10 +270,57 @@ class PlayerActivity : AppCompatActivity() {
                 p.prepare()
                 return
             }
+            if (isServerFailure(e) && tryNextServer(p)) return
             val tip = if (live) "Aperte OK para tentar de novo, ou cima/baixo para trocar de canal."
             else "Aperte OK para tentar de novo."
-            error.text = "Não foi possível reproduzir este conteúdo.\n(${e.errorCodeName})\n\n$tip"
+            error.text = "Não foi possível reproduzir este conteúdo.\n${explain(e)}\n\n$tip"
             error.isVisible = true
+        }
+    }
+
+    private fun isServerFailure(e: PlaybackException) = e.errorCode in setOf(
+        PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+        PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
+    )
+
+    /** Tenta o mesmo conteúdo no próximo servidor da conta. Retorna falso quando acabaram. */
+    private fun tryNextServer(p: ExoPlayer): Boolean {
+        val servers = PlaylistRepository.servers(this)
+        if (servers.size < 2 || serverTries >= servers.size - 1) return false
+        serverTries++
+        val current = servers.indexOf(playbackServer).coerceAtLeast(0)
+        val next = servers[(current + 1) % servers.size]
+        playbackServer = next
+        val index = p.currentMediaItemIndex
+        val position = if (live) C.TIME_UNSET else p.currentPosition
+        headers.clear()
+        p.setMediaItems(items.map(::toMediaItem), index, position)
+        p.prepare()
+        p.play()
+        info.text = "Tentando o servidor ${next.substringAfter("://")}…"
+        info.isVisible = true
+        handler.removeCallbacks(hideInfo)
+        handler.postDelayed(hideInfo, 4000)
+        return true
+    }
+
+    /** Traduz o erro do player para uma frase curta. */
+    private fun explain(e: PlaybackException): String {
+        var cause: Throwable? = e.cause
+        while (cause != null) {
+            if (cause is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) {
+                return Net.httpMessage(cause.responseCode).replaceFirstChar { it.uppercase() } + "."
+            }
+            cause = cause.cause
+        }
+        return when (e.errorCode) {
+            PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> "Não conectou ao servidor."
+            PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "O servidor não respondeu a tempo."
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+            PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED -> "Formato de vídeo não suportado pelo aparelho."
+            else -> "(${e.errorCodeName})"
         }
     }
 

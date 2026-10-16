@@ -5,7 +5,10 @@ import android.os.Bundle
 import android.view.View
 import android.widget.EditText
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import com.dcg.tv.R
 import com.dcg.tv.data.PlaylistRepository
 import com.dcg.tv.data.Source
@@ -39,6 +42,7 @@ class SetupActivity : AppCompatActivity() {
 
         findViewById<View>(R.id.saveUrl).setOnClickListener { saveUrl() }
         findViewById<View>(R.id.saveXtream).setOnClickListener { saveXtream() }
+        findViewById<View>(R.id.testServers).setOnClickListener { testServers() }
         servers.requestFocus()
     }
 
@@ -52,15 +56,33 @@ class SetupActivity : AppCompatActivity() {
         save(PlaylistRepository.asXtream(link) ?: Source.M3u(link))
     }
 
-    private fun saveXtream() {
+    private fun account(): XtreamAccount? {
         val list = Xtream.parseServers(servers.text.toString())
         val u = user.text.toString().trim()
         val p = pass.text.toString().trim()
         if (list.isEmpty() || u.isEmpty() || p.isEmpty()) {
             toast("Preencha servidor, usuário e senha.")
-            return
+            return null
         }
-        save(Source.Xtream(XtreamAccount(list, u, p)))
+        return XtreamAccount(list, u, p)
+    }
+
+    private fun saveXtream() {
+        save(Source.Xtream(account() ?: return))
+    }
+
+    /** Mostra, para cada servidor, se o login funciona. Ajuda a achar o endereço que mudou. */
+    private fun testServers() {
+        val account = account() ?: return
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Testando servidores")
+            .setMessage("Aguarde…")
+            .setPositiveButton("OK", null)
+            .show()
+        lifecycleScope.launch {
+            val lines = PlaylistRepository.testServers(account)
+            dialog.setMessage(lines.joinToString("\n\n"))
+        }
     }
 
     private fun save(source: Source) {

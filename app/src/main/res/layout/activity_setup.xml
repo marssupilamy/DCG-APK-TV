@@ -90,10 +90,21 @@
                 android:imeOptions="actionDone"
                 android:inputType="textPassword" />
 
-            <TextView
-                android:id="@+id/saveXtream"
-                style="@style/TabButton"
-                android:text="Entrar" />
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/saveXtream"
+                    style="@style/TabButton"
+                    android:text="Entrar" />
+
+                <TextView
+                    android:id="@+id/testServers"
+                    style="@style/TabButton"
+                    android:text="Testar servidores" />
+            </LinearLayout>
         </LinearLayout>
     </LinearLayout>
 </ScrollView>

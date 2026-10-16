@@ -27,6 +27,16 @@ object Net {
     const val API_USER_AGENT = "IPTVSmartersPro"
     const val PLAYER_USER_AGENT = "VLC/3.0.20 LibVLC/3.0.20"
 
+    /** Identificações testadas no login. Alguns servidores recusam aplicativos que não conhecem. */
+    val LOGIN_USER_AGENTS = listOf(API_USER_AGENT, PLAYER_USER_AGENT, "okhttp/4.12.0")
+
+    /** Identificação que o servidor aceitou no último login. */
+    @Volatile
+    var apiUserAgent = API_USER_AGENT
+
+    /** Resposta HTTP de erro, com o código para explicar ao usuário. */
+    class HttpStatusException(val code: Int) : IOException("o servidor respondeu com código $code")
+
     private const val DNS_CACHE_MS = 10 * 60 * 1000L
 
     private val bootstrapClient = OkHttpClient.Builder()
@@ -79,15 +89,15 @@ object Net {
     private fun call(url: String, userAgent: String) =
         client.newCall(Request.Builder().url(url).header("User-Agent", userAgent).build()).execute()
 
-    fun fetchText(url: String, userAgent: String = API_USER_AGENT): String =
+    fun fetchText(url: String, userAgent: String = apiUserAgent): String =
         call(url, userAgent).use { response ->
-            if (!response.isSuccessful) throw IOException("o servidor respondeu com código ${response.code}")
+            if (!response.isSuccessful) throw HttpStatusException(response.code)
             response.body?.string() ?: ""
         }
 
-    fun download(url: String, dest: File, userAgent: String = API_USER_AGENT) {
+    fun download(url: String, dest: File, userAgent: String = apiUserAgent) {
         call(url, userAgent).use { response ->
-            if (!response.isSuccessful) throw IOException("o servidor respondeu com código ${response.code}")
+            if (!response.isSuccessful) throw HttpStatusException(response.code)
             val body = response.body ?: throw IOException("resposta vazia")
             val tmp = File(dest.parentFile, dest.name + ".tmp")
             body.byteStream().use { input -> tmp.outputStream().use { input.copyTo(it, 64 * 1024) } }
@@ -100,10 +110,19 @@ object Net {
 
     /** Traduz erros de rede para uma frase curta. */
     fun describe(e: Throwable): String = when (e) {
+        is HttpStatusException -> httpMessage(e.code)
         is UnknownHostException -> "endereço não encontrado"
         is SocketTimeoutException -> "o servidor não respondeu a tempo"
         is ConnectException -> "conexão recusada"
         is javax.net.ssl.SSLException -> "falha na conexão segura"
         else -> e.message ?: e.javaClass.simpleName
+    }
+
+    /** Explica os códigos de erro mais comuns dos servidores de IPTV. */
+    fun httpMessage(code: Int): String = when (code) {
+        401, 403 -> "acesso negado (código $code): a conta pode estar bloqueada ou o servidor recusou o aplicativo"
+        404 -> "endereço não encontrado no servidor (código 404): o fornecedor pode ter trocado o DNS"
+        in 500..599 -> "o servidor está com problema (código $code)"
+        else -> "o servidor respondeu com código $code"
     }
 }

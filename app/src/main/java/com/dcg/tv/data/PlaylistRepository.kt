@@ -29,6 +29,7 @@ object PlaylistRepository {
     private const val KEY_PASS = "xt_pass"
     private const val KEY_ACTIVE = "xt_active"
     private const val KEY_LIVE_EXT = "xt_live_ext"
+    private const val KEY_AGENT = "xt_agent"
     private const val KEY_TIME = "playlist_time"
     private const val MAX_AGE_MS = 12 * 60 * 60 * 1000L
 
@@ -188,9 +189,11 @@ object PlaylistRepository {
                 file.delete()
             }
         }
+        Net.apiUserAgent = login.userAgent
         prefs(ctx).edit()
             .putString(KEY_ACTIVE, login.server)
             .putString(KEY_LIVE_EXT, login.liveExt)
+            .putString(KEY_AGENT, login.userAgent)
             .apply()
     }
 
@@ -222,7 +225,51 @@ object PlaylistRepository {
     /** Conta Xtream e servidor em uso, ou nulo quando a fonte é um link M3U. */
     private fun session(ctx: Context): Pair<XtreamAccount, String>? {
         val account = (getSource(ctx) as? Source.Xtream)?.account ?: return null
+        prefs(ctx).getString(KEY_AGENT, null)?.let { Net.apiUserAgent = it }
         return account to (prefs(ctx).getString(KEY_ACTIVE, null) ?: account.servers.first())
+    }
+
+    /** Servidores da conta Xtream, com o que está em uso primeiro. Vazio para listas M3U. */
+    fun servers(ctx: Context): List<String> {
+        val (account, active) = session(ctx) ?: return emptyList()
+        return listOf(active) + account.servers.filter { it != active }
+    }
+
+    fun setActiveServer(ctx: Context, server: String) {
+        prefs(ctx).edit().putString(KEY_ACTIVE, server).apply()
+    }
+
+    /** Troca o servidor de um link de canal, filme ou episódio, mantendo o resto do endereço. */
+    fun withServer(ctx: Context, url: String, server: String): String {
+        val account = (getSource(ctx) as? Source.Xtream)?.account ?: return url
+        val from = account.servers.firstOrNull { url.startsWith("$it/") } ?: return url
+        return server + url.substring(from.length)
+    }
+
+    /**
+     * Executa [block] no servidor em uso. Se ele falhar, tenta os outros servidores da conta
+     * e passa a usar o primeiro que funcionar.
+     */
+    private suspend fun <T> onAnyServer(ctx: Context, block: suspend (XtreamAccount, String) -> T): T {
+        val (account, _) = session(ctx) ?: throw IOException("Conta não configurada")
+        var last: Exception? = null
+        for (server in servers(ctx)) {
+            try {
+                val result = block(account, server)
+                if (server != prefs(ctx).getString(KEY_ACTIVE, null)) setActiveServer(ctx, server)
+                return result
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                last = e
+            }
+        }
+        throw last ?: IOException("Nenhum servidor respondeu")
+    }
+
+    /** Resultado de cada servidor, para a tela Configurar. */
+    suspend fun testServers(account: XtreamAccount): List<String> = withContext(Dispatchers.IO) {
+        Xtream.testServers(account)
     }
 
     fun hasXtream(ctx: Context) = getSource(ctx) is Source.Xtream
@@ -238,12 +285,11 @@ object PlaylistRepository {
         val xtreamId = series.xtreamId ?: return SeriesInfo(Details(poster = series.logo), series.episodes)
         seriesCache[xtreamId]?.let { return it }
         return withContext(Dispatchers.IO) {
-            val (account, server) = session(ctx) ?: throw IOException("Conta não configurada")
-            val body = Net.fetchText(account.apiUrl(server, "get_series_info", "&series_id=$xtreamId"))
-            val episodes = Xtream.readEpisodes(body.reader(), series) { id, ext -> account.episodeUrl(server, id, ext) }
-            val info = SeriesInfo(Details.read(body.reader()), episodes)
-            seriesCache[xtreamId] = info
-            info
+            onAnyServer(ctx) { account, server ->
+                val body = Net.fetchText(account.apiUrl(server, "get_series_info", "&series_id=$xtreamId"))
+                val episodes = Xtream.readEpisodes(body.reader(), series) { id, ext -> account.episodeUrl(server, id, ext) }
+                SeriesInfo(Details.read(body.reader()), episodes)
+            }.also { seriesCache[xtreamId] = it }
         }
     }
 
@@ -251,10 +297,11 @@ object PlaylistRepository {
     suspend fun movieDetails(ctx: Context, movie: Entry): Details {
         val id = movie.xtreamStreamId ?: return Details(poster = movie.logo)
         movieCache[id]?.let { return it }
+        if (session(ctx) == null) return Details(poster = movie.logo)
         return withContext(Dispatchers.IO) {
-            val (account, server) = session(ctx) ?: return@withContext Details(poster = movie.logo)
-            val body = Net.fetchText(account.apiUrl(server, "get_vod_info", "&vod_id=$id"))
-            Details.read(body.reader()).also { movieCache[id] = it }
+            onAnyServer(ctx) { account, server ->
+                Details.read(Net.fetchText(account.apiUrl(server, "get_vod_info", "&vod_id=$id")).reader())
+            }.also { movieCache[id] = it }
         }
     }
 
@@ -265,10 +312,11 @@ object PlaylistRepository {
         epgCache[cacheKey]?.let { (time, list) ->
             if (System.currentTimeMillis() - time < EPG_CACHE_MS) return list
         }
+        if (session(ctx) == null) return emptyList()
         return withContext(Dispatchers.IO) {
-            val (account, server) = session(ctx) ?: return@withContext emptyList()
-            val body = Net.fetchText(account.apiUrl(server, "get_short_epg", "&stream_id=$id&limit=$limit"))
-            Epg.readListings(body.reader()).also { epgCache[cacheKey] = System.currentTimeMillis() to it }
+            onAnyServer(ctx) { account, server ->
+                Epg.readListings(Net.fetchText(account.apiUrl(server, "get_short_epg", "&stream_id=$id&limit=$limit")).reader())
+            }.also { epgCache[cacheKey] = System.currentTimeMillis() to it }
         }
     }
 

@@ -36,7 +36,7 @@ object Xtream {
     fun parseServers(text: String): List<String> =
         text.split(Regex("""[\s,;]+""")).filter { it.isNotBlank() }.map(::normalizeServer).distinct()
 
-    class Login(val server: String, val liveExt: String)
+    class Login(val server: String, val liveExt: String, val userAgent: String = Net.API_USER_AGENT)
 
     /** Tenta cada servidor até um aceitar o login. O último que funcionou é testado primeiro. */
     fun login(account: XtreamAccount, preferred: String?): Login {
@@ -44,7 +44,7 @@ object Xtream {
         val errors = ArrayList<String>()
         for (server in order) {
             try {
-                return checkLogin(server, Net.fetchText(account.apiUrl(server)))
+                return loginOn(account, server)
             } catch (e: LoginRefused) {
                 throw IOException("${host(server)}: ${e.message}")
             } catch (e: Exception) {
@@ -52,6 +52,31 @@ object Xtream {
             }
         }
         throw IOException("Nenhum servidor respondeu.\n" + errors.joinToString("\n"))
+    }
+
+    /** Login num servidor. Se ele recusar a identificação do app (403 ou 404), tenta as outras. */
+    private fun loginOn(account: XtreamAccount, server: String): Login {
+        var last: Exception? = null
+        for (agent in Net.LOGIN_USER_AGENTS) {
+            try {
+                val login = checkLogin(server, Net.fetchText(account.apiUrl(server), agent))
+                return Login(login.server, login.liveExt, agent)
+            } catch (e: Net.HttpStatusException) {
+                last = e
+                if (e.code != 403 && e.code != 404) throw e
+            }
+        }
+        throw last ?: IOException("sem resposta")
+    }
+
+    /** Testa cada servidor e descreve o resultado em uma linha. */
+    fun testServers(account: XtreamAccount): List<String> = account.servers.map { server ->
+        try {
+            loginOn(account, server)
+            "${host(server)}: funcionando"
+        } catch (e: Exception) {
+            "${host(server)}: ${Net.describe(e)}"
+        }
     }
 
     class LoginRefused(message: String) : IOException(message)
