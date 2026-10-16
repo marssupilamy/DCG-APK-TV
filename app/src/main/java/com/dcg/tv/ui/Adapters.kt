@@ -71,6 +71,7 @@ data class GridItem(val title: String, val image: String?)
 class GridAdapter(
     private val onClick: (Int) -> Unit,
     private val onLongClick: (Int) -> Unit,
+    private val onFocus: (Int) -> Unit = {},
 ) : RecyclerView.Adapter<GridAdapter.Holder>() {
 
     class Holder(view: View) : RecyclerView.ViewHolder(view) {
@@ -112,6 +113,7 @@ class GridAdapter(
         view.setOnFocusChangeListener { v, hasFocus ->
             val scale = if (hasFocus) 1.06f else 1f
             v.animate().scaleX(scale).scaleY(scale).setDuration(120).start()
+            if (hasFocus) holder.withPosition(onFocus)
         }
         return holder
     }

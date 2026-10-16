@@ -6,11 +6,13 @@ import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import coil.load
 import com.dcg.tv.R
+import com.dcg.tv.data.Details
 import com.dcg.tv.data.Entry
 import com.dcg.tv.data.Net
 import com.dcg.tv.data.PlayerQueue
@@ -72,7 +74,9 @@ class SeriesActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
-                show(PlaylistRepository.episodes(this@SeriesActivity, series))
+                val info = PlaylistRepository.seriesInfo(this@SeriesActivity, series)
+                showDetails(info.details)
+                show(info.episodes)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -85,6 +89,14 @@ class SeriesActivity : AppCompatActivity() {
         super.onResume()
         // Ao voltar do player, atualiza o "parou em".
         if (currentSeason >= 0) episodeAdapter.refresh(episodes.map(::label))
+    }
+
+    private fun showDetails(d: Details) {
+        val plot = findViewById<TextView>(R.id.plot)
+        val text = listOfNotNull(d.summary.ifEmpty { null }, d.plot).joinToString("\n")
+        plot.text = text
+        plot.isVisible = text.isNotEmpty()
+        if (series.logo == null && d.poster != null) findViewById<ImageView>(R.id.poster).load(d.poster)
     }
 
     private fun updateFavorite() {

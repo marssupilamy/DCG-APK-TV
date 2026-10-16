@@ -40,7 +40,6 @@ object PlaylistRepository {
     var library: Library? = null
         private set
 
-    private val episodeCache = ConcurrentHashMap<String, List<Entry>>()
 
     /** [stale] indica que a cópia salva é antiga e vale baixar de novo em segundo plano. */
     class LoadResult(val library: Library, val warning: String?, val stale: Boolean)
@@ -78,6 +77,13 @@ object PlaylistRepository {
         return Source.Xtream(XtreamAccount(listOf(Xtream.normalizeServer(url)), user, pass))
     }
 
+    private fun clearCaches() {
+        seriesCache.clear()
+        movieCache.clear()
+        epgCache.clear()
+        agendaCache = null
+    }
+
     fun setSource(ctx: Context, source: Source) {
         val edit = prefs(ctx).edit().clear()
         when (source) {
@@ -90,7 +96,7 @@ object PlaylistRepository {
         edit.apply()
         m3uFile(ctx).delete()
         XTREAM_FILES.forEach { xtFile(ctx, it).delete() }
-        episodeCache.clear()
+        clearCaches()
         library = null
     }
 
@@ -149,7 +155,7 @@ object PlaylistRepository {
             is Source.Xtream -> downloadXtream(ctx, source.account, progress)
         }
         prefs(ctx).edit().putLong(KEY_TIME, System.currentTimeMillis()).apply()
-        episodeCache.clear()
+        clearCaches()
     }
 
     private suspend fun downloadXtream(ctx: Context, account: XtreamAccount, progress: (String) -> Unit) {
@@ -213,18 +219,99 @@ object PlaylistRepository {
         Library(live.await(), movies.await(), series.await())
     }
 
-    /** Episódios da série. Nas contas Xtream vêm do servidor na primeira vez que a série é aberta. */
-    suspend fun episodes(ctx: Context, series: Series): List<Entry> {
-        val xtreamId = series.xtreamId ?: return series.episodes
-        episodeCache[xtreamId]?.let { return it }
+    /** Conta Xtream e servidor em uso, ou nulo quando a fonte é um link M3U. */
+    private fun session(ctx: Context): Pair<XtreamAccount, String>? {
+        val account = (getSource(ctx) as? Source.Xtream)?.account ?: return null
+        return account to (prefs(ctx).getString(KEY_ACTIVE, null) ?: account.servers.first())
+    }
+
+    fun hasXtream(ctx: Context) = getSource(ctx) is Source.Xtream
+
+    class SeriesInfo(val details: Details, val episodes: List<Entry>)
+
+    private val seriesCache = ConcurrentHashMap<String, SeriesInfo>()
+    private val movieCache = ConcurrentHashMap<String, Details>()
+    private val epgCache = ConcurrentHashMap<String, Pair<Long, List<Program>>>()
+
+    /** Episódios e sinopse da série. Nas contas Xtream vêm do servidor na primeira vez que a série é aberta. */
+    suspend fun seriesInfo(ctx: Context, series: Series): SeriesInfo {
+        val xtreamId = series.xtreamId ?: return SeriesInfo(Details(poster = series.logo), series.episodes)
+        seriesCache[xtreamId]?.let { return it }
         return withContext(Dispatchers.IO) {
-            val account = (getSource(ctx) as? Source.Xtream)?.account
-                ?: throw IOException("Conta não configurada")
-            val server = prefs(ctx).getString(KEY_ACTIVE, null) ?: account.servers.first()
+            val (account, server) = session(ctx) ?: throw IOException("Conta não configurada")
             val body = Net.fetchText(account.apiUrl(server, "get_series_info", "&series_id=$xtreamId"))
-            val list = Xtream.readEpisodes(body.reader(), series) { id, ext -> account.episodeUrl(server, id, ext) }
-            episodeCache[xtreamId] = list
-            list
+            val episodes = Xtream.readEpisodes(body.reader(), series) { id, ext -> account.episodeUrl(server, id, ext) }
+            val info = SeriesInfo(Details.read(body.reader()), episodes)
+            seriesCache[xtreamId] = info
+            info
         }
     }
+
+    /** Sinopse e ficha do filme. Listas M3U não têm esses dados. */
+    suspend fun movieDetails(ctx: Context, movie: Entry): Details {
+        val id = movie.xtreamStreamId ?: return Details(poster = movie.logo)
+        movieCache[id]?.let { return it }
+        return withContext(Dispatchers.IO) {
+            val (account, server) = session(ctx) ?: return@withContext Details(poster = movie.logo)
+            val body = Net.fetchText(account.apiUrl(server, "get_vod_info", "&vod_id=$id"))
+            Details.read(body.reader()).also { movieCache[id] = it }
+        }
+    }
+
+    /** Próximos programas do canal. Guarda por 15 minutos. */
+    suspend fun programs(ctx: Context, channel: Entry, limit: Int = 4): List<Program> {
+        val id = channel.xtreamStreamId ?: return emptyList()
+        val cacheKey = "$id/$limit"
+        epgCache[cacheKey]?.let { (time, list) ->
+            if (System.currentTimeMillis() - time < EPG_CACHE_MS) return list
+        }
+        return withContext(Dispatchers.IO) {
+            val (account, server) = session(ctx) ?: return@withContext emptyList()
+            val body = Net.fetchText(account.apiUrl(server, "get_short_epg", "&stream_id=$id&limit=$limit"))
+            Epg.readListings(body.reader()).also { epgCache[cacheKey] = System.currentTimeMillis() to it }
+        }
+    }
+
+    private var agendaCache: Pair<Long, Map<Sport, List<Game>>>? = null
+
+    /**
+     * Agenda de jogos: lê a programação dos canais de esporte, dez de cada vez.
+     * [progress] recebe quantos canais já foram lidos e o total.
+     */
+    suspend fun agenda(ctx: Context, force: Boolean, progress: (Int, Int) -> Unit): Map<Sport, List<Game>> {
+        if (!force) agendaCache?.let { (time, agenda) -> if (System.currentTimeMillis() - time < AGENDA_CACHE_MS) return agenda }
+        val lib = library ?: return emptyMap()
+        val channels = lib.live.asSequence()
+            .flatMap { it.items }
+            .filter(Sports::isSportsChannel)
+            .distinctBy(Sports::channelKey)
+            .take(MAX_AGENDA_CHANNELS)
+            .toList()
+        val listings = java.util.Collections.synchronizedMap(LinkedHashMap<Entry, List<Program>>())
+        val done = java.util.concurrent.atomic.AtomicInteger()
+        progress(0, channels.size)
+        withContext(Dispatchers.IO) {
+            channels.chunked(AGENDA_PARALLEL).forEach { chunk ->
+                chunk.map { channel ->
+                    async {
+                        try {
+                            listings[channel] = programs(ctx, channel, limit = AGENDA_PROGRAMS)
+                        } catch (e: Exception) {
+                            // Canal sem programação: segue com os outros.
+                        }
+                        progress(done.incrementAndGet(), channels.size)
+                    }
+                }.awaitAll()
+            }
+        }
+        val agenda = Sports.buildAgenda(LinkedHashMap(listings), System.currentTimeMillis())
+        agendaCache = System.currentTimeMillis() to agenda
+        return agenda
+    }
+
+    private const val EPG_CACHE_MS = 15 * 60 * 1000L
+    private const val AGENDA_CACHE_MS = 30 * 60 * 1000L
+    private const val MAX_AGENDA_CHANNELS = 200
+    private const val AGENDA_PARALLEL = 10
+    private const val AGENDA_PROGRAMS = 30
 }

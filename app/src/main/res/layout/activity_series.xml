@@ -48,6 +48,17 @@
         android:layout_weight="1"
         android:orientation="vertical">
 
+        <TextView
+            android:id="@+id/plot"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:ellipsize="end"
+            android:maxLines="4"
+            android:textColor="@color/text"
+            android:textSize="15sp"
+            android:visibility="gone" />
+
         <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/seasons"
             android:layout_width="match_parent"

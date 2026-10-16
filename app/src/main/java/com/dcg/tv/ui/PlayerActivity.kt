@@ -9,14 +9,19 @@ import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
 import androidx.annotation.OptIn
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
 import androidx.core.view.isVisible
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.ResolvingDataSource
@@ -26,9 +31,15 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import com.dcg.tv.R
 import com.dcg.tv.data.Entry
+import com.dcg.tv.data.Epg
 import com.dcg.tv.data.Net
 import com.dcg.tv.data.PlayerQueue
+import com.dcg.tv.data.PlaylistRepository
 import com.dcg.tv.data.UserData
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import java.util.Locale
 
 /**
  * Controles pelo controle remoto:
@@ -36,6 +47,7 @@ import com.dcg.tv.data.UserData
  *   (segurar acelera); cima e baixo mostram a barra de controles.
  * - Ao vivo: cima e baixo trocam de canal; OK mostra a barra de controles.
  * - Botões de mídia (play/pause, avançar, voltar) funcionam nos dois casos.
+ * - Menu: escolhe o áudio e a legenda.
  */
 @OptIn(UnstableApi::class)
 class PlayerActivity : AppCompatActivity() {
@@ -127,6 +139,10 @@ class PlayerActivity : AppCompatActivity() {
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSource))
             .setSeekBackIncrementMs(SEEK_STEP_MS)
             .setSeekForwardIncrementMs(SEEK_FORWARD_BUTTON_MS)
+            .build()
+        // Prefere o áudio em português quando o conteúdo tem mais de um idioma.
+        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+            .setPreferredAudioLanguage("pt")
             .build()
         // No ao vivo, se a conexão cair, o canal reconecta em vez de pular para o próximo.
         if (live) p.repeatMode = Player.REPEAT_MODE_ONE
@@ -252,13 +268,104 @@ class PlayerActivity : AppCompatActivity() {
         val title = if (live) "${index + 1}. ${entry.name}\n${entry.group}" else entry.name
         val help = when {
             !withHelp -> ""
-            live -> "\n\nCima/baixo: trocar de canal"
-            else -> "\n\nOK: pausar  ·  Esquerda/direita: voltar/avançar"
+            live -> "\n\nCima/baixo: trocar de canal  ·  Menu: áudio e legenda"
+            else -> "\n\nOK: pausar  ·  Esquerda/direita: voltar/avançar  ·  Menu: áudio e legenda"
         }
         info.text = title + help
         info.isVisible = true
         handler.removeCallbacks(hideInfo)
-        handler.postDelayed(hideInfo, if (withHelp) 6000L else 4000L)
+        handler.postDelayed(hideInfo, if (withHelp) 6000L else 5000L)
+        if (live) loadNowNext(index, entry, title, help)
+    }
+
+    private var epgJob: Job? = null
+
+    /** No ao vivo, acrescenta o que passa agora e depois no canal. */
+    private fun loadNowNext(index: Int, entry: Entry, title: String, help: String) {
+        epgJob?.cancel()
+        if (!PlaylistRepository.hasXtream(this)) return
+        epgJob = lifecycleScope.launch {
+            val text = try {
+                Epg.describeNowNext(PlaylistRepository.programs(this@PlayerActivity, entry), System.currentTimeMillis())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            }
+            if (text == null) return@launch
+            if (player?.currentMediaItemIndex == index && info.isVisible) info.text = "$title\n\n$text$help"
+        }
+    }
+
+    // ---- áudio e legenda ----
+
+    private class TrackOption(val group: Tracks.Group, val index: Int, val label: String, val selected: Boolean)
+
+    private fun trackOptions(p: ExoPlayer, type: Int): List<TrackOption> {
+        val list = ArrayList<TrackOption>()
+        for (group in p.currentTracks.groups) {
+            if (group.type != type) continue
+            for (i in 0 until group.length) {
+                if (!group.isTrackSupported(i)) continue
+                list.add(TrackOption(group, i, trackLabel(group.getTrackFormat(i), type, list.size + 1), group.isTrackSelected(i)))
+            }
+        }
+        return list
+    }
+
+    private fun trackLabel(format: Format, type: Int, number: Int): String {
+        val language = format.language?.takeIf { it != "und" }?.let { code ->
+            Locale(code).getDisplayLanguage(Locale("pt", "BR")).replaceFirstChar { it.uppercase() }
+        }
+        val channels = if (type == C.TRACK_TYPE_AUDIO && format.channelCount > 2) "${format.channelCount - 1}.1" else null
+        return listOfNotNull(language, format.label?.takeIf { it != language }, channels)
+            .joinToString("  ·  ")
+            .ifEmpty { if (type == C.TRACK_TYPE_AUDIO) "Áudio $number" else "Legenda $number" }
+    }
+
+    private fun showTracksMenu() {
+        val p = player ?: return
+        val audio = trackOptions(p, C.TRACK_TYPE_AUDIO)
+        val text = trackOptions(p, C.TRACK_TYPE_TEXT)
+        if (audio.size <= 1 && text.isEmpty()) {
+            Toast.makeText(this, "Este conteúdo não tem outras opções de áudio ou legenda.", Toast.LENGTH_LONG).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Áudio e legenda")
+            .setItems(arrayOf("Áudio (${audio.size} opções)", "Legenda (${text.size} opções)")) { _, which ->
+                pickTrack(if (which == 0) C.TRACK_TYPE_AUDIO else C.TRACK_TYPE_TEXT)
+            }
+            .show()
+    }
+
+    private fun pickTrack(type: Int) {
+        val p = player ?: return
+        val options = trackOptions(p, type)
+        val isText = type == C.TRACK_TYPE_TEXT
+        val textOff = isText && p.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
+        val labels = (if (isText) listOf("Desligada") else emptyList()) + options.map { it.label }
+        val selected = options.indexOfFirst { it.selected }
+        val checked = when {
+            isText && (textOff || selected < 0) -> 0
+            isText -> selected + 1
+            else -> selected.coerceAtLeast(0)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(if (isText) "Legenda" else "Áudio")
+            .setSingleChoiceItems(labels.toTypedArray(), checked) { dialog, which ->
+                val builder = p.trackSelectionParameters.buildUpon()
+                if (isText && which == 0) {
+                    builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                } else {
+                    val option = options[if (isText) which - 1 else which]
+                    builder.setTrackTypeDisabled(type, false)
+                        .setOverrideForType(TrackSelectionOverride(option.group.mediaTrackGroup, option.index))
+                }
+                p.trackSelectionParameters = builder.build()
+                dialog.dismiss()
+            }
+            .show()
     }
 
     // ---- teclas ----
@@ -296,6 +403,7 @@ class PlayerActivity : AppCompatActivity() {
             KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> return live || seek(p, SEEK_FORWARD_BUTTON_MS)
             KeyEvent.KEYCODE_MEDIA_REWIND -> return live || seek(p, -SEEK_STEP_MS)
             KeyEvent.KEYCODE_BACK -> if (controlsVisible) { playerView.hideController(); return true }
+            KeyEvent.KEYCODE_MENU -> { showTracksMenu(); return true }
         }
 
         // Com a barra visível, o controle navega pelos botões dela.

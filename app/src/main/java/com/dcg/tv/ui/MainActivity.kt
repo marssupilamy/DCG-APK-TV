@@ -19,6 +19,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.dcg.tv.R
 import com.dcg.tv.data.Entry
+import com.dcg.tv.data.Epg
 import com.dcg.tv.data.Kind
 import com.dcg.tv.data.Library
 import com.dcg.tv.data.M3uParser
@@ -38,12 +39,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var loadingText: TextView
     private lateinit var gridTitle: TextView
     private lateinit var empty: TextView
+    private lateinit var epg: TextView
     private lateinit var categories: RecyclerView
     private lateinit var grid: RecyclerView
     private lateinit var gridLayout: GridLayoutManager
 
     private val categoryAdapter = TextListAdapter(R.layout.item_text, ::onCategoryClick, ::onCategoryFocus)
-    private val gridAdapter = GridAdapter(::onItemClick, ::onItemLongClick)
+    private val gridAdapter = GridAdapter(::onItemClick, ::onItemLongClick, ::onItemFocus)
     private val handler = Handler(Looper.getMainLooper())
     private var pendingCategory: Runnable? = null
 
@@ -52,6 +54,15 @@ class MainActivity : AppCompatActivity() {
     private var entries: List<Entry> = emptyList()
     private var series: List<Series> = emptyList()
     private var shownKeys: List<String> = emptyList()
+
+    /** Tipo do que está na grade. Na busca geral pode ser diferente da aba. */
+    private var gridKind = Kind.LIVE
+
+    /** Resultados da busca geral. Enquanto existem, a coluna mostra TV, Filmes e Séries. */
+    private class Results(val query: String, val live: List<Entry>, val movies: List<Entry>, val series: List<Series>)
+
+    private var results: Results? = null
+    private var epgJob: kotlinx.coroutines.Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -72,10 +83,14 @@ class MainActivity : AppCompatActivity() {
         loadingText = findViewById(R.id.loadingText)
         gridTitle = findViewById(R.id.gridTitle)
         empty = findViewById(R.id.empty)
+        epg = findViewById(R.id.epg)
         categories = findViewById(R.id.categories)
         grid = findViewById(R.id.grid)
 
         tabs.forEach { (kind, view) -> view.setOnClickListener { showSection(kind) } }
+        findViewById<View>(R.id.tabGames).setOnClickListener {
+            if (PlaylistRepository.library != null) startActivity(Intent(this, GamesActivity::class.java))
+        }
         findViewById<View>(R.id.btnSearch).setOnClickListener { askSearch() }
         findViewById<View>(R.id.btnRefresh).setOnClickListener { refresh() }
         findViewById<View>(R.id.btnSettings).setOnClickListener {
@@ -100,11 +115,11 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         // Ao voltar do player, os vistos recentemente podem ter mudado.
-        if (categoryIndex == FAVORITES || categoryIndex == RECENT) {
+        if (results == null && (categoryIndex == FAVORITES || categoryIndex == RECENT)) {
             val keys = virtualKeys(categoryIndex)
             if (keys != shownKeys) showCategory(categoryIndex)
         }
-        if (PlaylistRepository.library != null) updateCategoryNames()
+        if (PlaylistRepository.library != null && results == null) updateCategoryNames()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -206,6 +221,7 @@ class MainActivity : AppCompatActivity() {
     private fun showSection(kind: Kind) {
         val lib = PlaylistRepository.library ?: return
         section = kind
+        results = null
         tabs.forEach { (k, v) -> v.isSelected = k == kind }
         categoryAdapter.submit(categoryNames(lib))
         categories.scrollToPosition(0)
@@ -229,6 +245,15 @@ class MainActivity : AppCompatActivity() {
         val lib = PlaylistRepository.library ?: return
         categoryIndex = index
         categoryAdapter.select(index)
+        results?.let { r ->
+            val title = "Busca: \"${r.query}\""
+            when (index) {
+                0 -> showEntries(Kind.LIVE, "$title em TV ao Vivo", r.live)
+                1 -> showEntries(Kind.MOVIE, "$title em Filmes", r.movies)
+                else -> showSeries("$title em Séries", r.series)
+            }
+            return
+        }
         if (index == FAVORITES || index == RECENT) {
             val title = if (index == FAVORITES) "Favoritos" else "Vistos recentemente"
             val keys = virtualKeys(index)
@@ -236,7 +261,7 @@ class MainActivity : AppCompatActivity() {
             if (section == Kind.SERIES) {
                 showSeries(title, keys.mapNotNull { lib.seriesByKey[it] })
             } else {
-                showEntries(title, keys.mapNotNull { lib.entriesByKey[it] })
+                showEntries(section, title, keys.mapNotNull { lib.entriesByKey[it] })
             }
             if (keys.isEmpty()) {
                 empty.text = if (index == FAVORITES) {
@@ -250,16 +275,17 @@ class MainActivity : AppCompatActivity() {
         shownKeys = emptyList()
         val real = index - FIRST_REAL
         when (section) {
-            Kind.LIVE -> lib.live.getOrNull(real).let { showEntries(it?.name, it?.items.orEmpty()) }
-            Kind.MOVIE -> lib.movies.getOrNull(real).let { showEntries(it?.name, it?.items.orEmpty()) }
+            Kind.LIVE -> lib.live.getOrNull(real).let { showEntries(Kind.LIVE, it?.name, it?.items.orEmpty()) }
+            Kind.MOVIE -> lib.movies.getOrNull(real).let { showEntries(Kind.MOVIE, it?.name, it?.items.orEmpty()) }
             Kind.SERIES -> lib.series.getOrNull(real).let { showSeries(it?.name, it?.items.orEmpty()) }
         }
     }
 
-    private fun showEntries(title: String?, list: List<Entry>) {
+    private fun showEntries(kind: Kind, title: String?, list: List<Entry>) {
         entries = list
         series = emptyList()
-        val poster = section == Kind.MOVIE
+        gridKind = kind
+        val poster = kind == Kind.MOVIE
         gridLayout.spanCount = if (poster) POSTER_COLUMNS else CHANNEL_COLUMNS
         gridAdapter.submit(list.map { GridItem(it.name, it.logo) }, poster)
         afterGridChange(title, list.size)
@@ -268,6 +294,7 @@ class MainActivity : AppCompatActivity() {
     private fun showSeries(title: String?, list: List<Series>) {
         series = list
         entries = emptyList()
+        gridKind = Kind.SERIES
         gridLayout.spanCount = POSTER_COLUMNS
         gridAdapter.submit(list.map { GridItem(it.name, it.logo) }, poster = true)
         afterGridChange(title, list.size)
@@ -277,6 +304,8 @@ class MainActivity : AppCompatActivity() {
         gridTitle.text = if (title == null) "" else "$title ($count)"
         empty.text = if (title == null) "Nenhum conteúdo nesta seção." else "Nenhum item encontrado."
         empty.isVisible = count == 0
+        epgJob?.cancel()
+        epg.isVisible = false
         grid.scrollToPosition(0)
     }
 
@@ -300,15 +329,15 @@ class MainActivity : AppCompatActivity() {
     // ---- itens ----
 
     private fun onItemClick(position: Int) {
-        when (section) {
+        when (gridKind) {
             Kind.LIVE -> {
                 PlayerQueue.set(entries, position, live = true)
                 startActivity(Intent(this, PlayerActivity::class.java))
             }
-            Kind.MOVIE -> {
-                PlayerQueue.set(listOf(entries[position]), 0, live = false)
-                startActivity(Intent(this, PlayerActivity::class.java))
-            }
+            Kind.MOVIE -> startActivity(
+                Intent(this, MovieActivity::class.java)
+                    .putExtra(MovieActivity.EXTRA_KEY, entries[position].key)
+            )
             Kind.SERIES -> startActivity(
                 Intent(this, SeriesActivity::class.java)
                     .putExtra(SeriesActivity.EXTRA_ID, series[position].id)
@@ -317,15 +346,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onItemLongClick(position: Int) {
-        val (key, name) = when (section) {
+        val (key, name) = when (gridKind) {
             Kind.SERIES -> series.getOrNull(position)?.let { it.key to it.name }
             else -> entries.getOrNull(position)?.let { it.key to it.name }
         } ?: return
         val added = UserData.toggleFavorite(key)
         val msg = if (added) "\"$name\" adicionado aos favoritos" else "\"$name\" removido dos favoritos"
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        if (results != null) return
         updateCategoryNames()
         if (categoryIndex == FAVORITES) showCategory(FAVORITES)
+    }
+
+    /** Na TV ao vivo, mostra o que passa agora no canal em foco. */
+    private fun onItemFocus(position: Int) {
+        epgJob?.cancel()
+        if (gridKind != Kind.LIVE || !PlaylistRepository.hasXtream(this)) return
+        val channel = entries.getOrNull(position) ?: return
+        epgJob = lifecycleScope.launch {
+            kotlinx.coroutines.delay(400)
+            val text = try {
+                Epg.describeNowNext(PlaylistRepository.programs(this@MainActivity, channel), System.currentTimeMillis())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            }
+            epg.text = "${channel.name}\n${text ?: "Sem programação disponível."}"
+            epg.isVisible = true
+        }
     }
 
     // ---- busca ----
@@ -342,13 +391,8 @@ class MainActivity : AppCompatActivity() {
             setPadding(pad, pad / 2, pad, 0)
             addView(input)
         }
-        val where = when (section) {
-            Kind.LIVE -> "TV ao Vivo"
-            Kind.MOVIE -> "Filmes"
-            Kind.SERIES -> "Séries"
-        }
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Buscar em $where")
+            .setTitle("Buscar em TV, filmes e séries")
             .setView(box)
             .setPositiveButton("Buscar") { _, _ -> search(input.text.toString()) }
             .setNegativeButton("Cancelar", null)
@@ -366,20 +410,29 @@ class MainActivity : AppCompatActivity() {
         input.requestFocus()
     }
 
+    /** Procura nas três seções. A coluna da esquerda passa a mostrar os resultados de cada uma. */
     private fun search(text: String) {
         val lib = PlaylistRepository.library ?: return
-        val query = M3uParser.normalize(text.trim())
+        val shown = text.trim()
+        val query = M3uParser.normalize(shown)
         if (query.isEmpty()) return
         pendingCategory?.let(handler::removeCallbacks)
-        categoryIndex = NONE
         shownKeys = emptyList()
-        categoryAdapter.select(NONE)
-        val title = "Busca: \"${text.trim()}\""
-        when (section) {
-            Kind.LIVE -> showEntries(title, lib.live.flatMap { it.items }.filterByName(query) { it.name })
-            Kind.MOVIE -> showEntries(title, lib.movies.flatMap { it.items }.filterByName(query) { it.name })
-            Kind.SERIES -> showSeries(title, lib.series.flatMap { it.items }.filterByName(query) { it.name })
-        }
+        val r = Results(
+            shown,
+            lib.live.flatMap { it.items }.filterByName(query) { it.name },
+            lib.movies.flatMap { it.items }.filterByName(query) { it.name },
+            lib.series.flatMap { it.items }.filterByName(query) { it.name },
+        )
+        results = r
+        tabs.values.forEach { it.isSelected = false }
+        categoryAdapter.submit(
+            listOf("TV ao Vivo (${r.live.size})", "Filmes (${r.movies.size})", "Séries (${r.series.size})")
+        )
+        categoryIndex = NONE
+        // Abre o primeiro grupo que tiver resultado.
+        val first = listOf(r.live, r.movies, r.series).indexOfFirst { it.isNotEmpty() }.coerceAtLeast(0)
+        showCategory(first)
         focusFirstGridItem()
     }
 

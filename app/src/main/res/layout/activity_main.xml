@@ -39,6 +39,11 @@
             style="@style/TabButton"
             android:text="Séries" />
 
+        <TextView
+            android:id="@+id/tabGames"
+            style="@style/TabButton"
+            android:text="Jogos" />
+
         <View
             android:layout_width="0dp"
             android:layout_height="1dp"
@@ -106,6 +111,19 @@
                     android:textColor="@color/text"
                     android:textSize="18sp"
                     android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/epg"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
+                    android:background="@drawable/overlay_bg"
+                    android:maxLines="2"
+                    android:ellipsize="end"
+                    android:padding="10dp"
+                    android:textColor="@color/text"
+                    android:textSize="14sp"
+                    android:visibility="gone" />
 
                 <TextView
                     android:id="@+id/empty"

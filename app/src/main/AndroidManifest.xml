@@ -42,6 +42,14 @@
             android:screenOrientation="landscape" />
 
         <activity
+            android:name=".ui.MovieActivity"
+            android:screenOrientation="landscape" />
+
+        <activity
+            android:name=".ui.GamesActivity"
+            android:screenOrientation="landscape" />
+
+        <activity
             android:name=".ui.PlayerActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation"
             android:screenOrientation="landscape"
