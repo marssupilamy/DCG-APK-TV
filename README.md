@@ -14,7 +14,9 @@ Os grupos da lista viram as categorias da coluna da esquerda.
 
 ## Recursos
 
-- Link M3U direto ou login com servidor, usuário e senha (Xtream Codes).
+- Login com servidor, usuário e senha (Xtream Codes, o mesmo padrão do Smarters), com vários servidores: se um cair, o app tenta o próximo.
+- Link M3U direto. Links `get.php` viram login Xtream automaticamente.
+- DNS seguro próprio (Cloudflare e Google), para funcionar mesmo quando o provedor de internet bloqueia os endereços.
 - A lista fica salva no aparelho e é atualizada a cada 12 horas, ou pelo botão **Atualizar**.
 - Busca por nome dentro da aba aberta.
 - No ao vivo, as setas cima e baixo do controle trocam de canal.

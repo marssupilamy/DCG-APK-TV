@@ -21,6 +21,7 @@ import com.dcg.tv.data.Entry
 import com.dcg.tv.data.Kind
 import com.dcg.tv.data.Library
 import com.dcg.tv.data.M3uParser
+import com.dcg.tv.data.Net
 import com.dcg.tv.data.PlayerQueue
 import com.dcg.tv.data.PlaylistRepository
 import com.dcg.tv.data.Series
@@ -51,7 +52,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (PlaylistRepository.getUrl(this) == null) {
+        if (PlaylistRepository.getSource(this) == null) {
             startActivity(Intent(this, SetupActivity::class.java))
             finish()
             return
@@ -108,7 +109,9 @@ class MainActivity : AppCompatActivity() {
         loading.isVisible = true
         lifecycleScope.launch {
             try {
-                val result = PlaylistRepository.load(this@MainActivity, force)
+                val result = PlaylistRepository.load(this@MainActivity, force) { message ->
+                    runOnUiThread { loadingText.text = message }
+                }
                 status.text = result.warning.orEmpty()
                 status.isVisible = result.warning != null
                 render(result.library)
@@ -125,7 +128,7 @@ class MainActivity : AppCompatActivity() {
     private fun showLoadError(e: Exception) {
         AlertDialog.Builder(this)
             .setTitle("Não foi possível carregar a lista")
-            .setMessage("${e.message ?: e.javaClass.simpleName}\n\nConfira a internet e o link da lista.")
+            .setMessage("${Net.describe(e)}\n\nConfira a internet, os servidores, o usuário e a senha em Configurar.")
             .setPositiveButton("Tentar de novo") { _, _ -> load(force = true) }
             .setNegativeButton("Configurar") { _, _ -> startActivity(Intent(this, SetupActivity::class.java)) }
             .setCancelable(false)

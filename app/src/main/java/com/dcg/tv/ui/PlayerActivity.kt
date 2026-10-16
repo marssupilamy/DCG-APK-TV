@@ -18,15 +18,15 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import com.dcg.tv.R
 import com.dcg.tv.data.Entry
+import com.dcg.tv.data.Net
 import com.dcg.tv.data.PlayerQueue
-import com.dcg.tv.data.PlaylistRepository
 
 @OptIn(UnstableApi::class)
 class PlayerActivity : AppCompatActivity() {
@@ -91,11 +91,7 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun initPlayer() {
         if (player != null) return
-        val http = DefaultHttpDataSource.Factory()
-            .setUserAgent(PlaylistRepository.USER_AGENT)
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(30_000)
+        val http = OkHttpDataSource.Factory(Net.client).setUserAgent(Net.PLAYER_USER_AGENT)
         val dataSource = ResolvingDataSource.Factory(DefaultDataSource.Factory(this, http)) { spec ->
             headers[spec.uri.toString()]?.let { spec.withAdditionalHeaders(it) } ?: spec
         }

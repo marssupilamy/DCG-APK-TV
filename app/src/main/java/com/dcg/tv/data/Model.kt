@@ -19,6 +19,8 @@ data class Series(
     val logo: String?,
     val group: String,
     val episodes: List<Entry>,
+    /** Nas contas Xtream os episódios vêm do servidor só quando a série é aberta. */
+    val xtreamId: String? = null,
 ) {
     val seasons: List<Int> get() = episodes.map { it.season }.distinct().sorted()
 }
