@@ -7,6 +7,7 @@ import android.os.Looper
 import android.view.KeyEvent
 import android.view.WindowManager
 import android.widget.TextView
+import android.widget.Toast
 import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
@@ -27,7 +28,15 @@ import com.dcg.tv.R
 import com.dcg.tv.data.Entry
 import com.dcg.tv.data.Net
 import com.dcg.tv.data.PlayerQueue
+import com.dcg.tv.data.UserData
 
+/**
+ * Controles pelo controle remoto:
+ * - Filmes e episódios: OK pausa e retoma; esquerda e direita voltam e avançam
+ *   (segurar acelera); cima e baixo mostram a barra de controles.
+ * - Ao vivo: cima e baixo trocam de canal; OK mostra a barra de controles.
+ * - Botões de mídia (play/pause, avançar, voltar) funcionam nos dois casos.
+ */
 @OptIn(UnstableApi::class)
 class PlayerActivity : AppCompatActivity() {
 
@@ -37,11 +46,26 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var error: TextView
     private val handler = Handler(Looper.getMainLooper())
     private val hideInfo = Runnable { info.isVisible = false }
+    private val tick = object : Runnable {
+        override fun run() {
+            trackProgress(save = true)
+            handler.postDelayed(this, PROGRESS_INTERVAL_MS)
+        }
+    }
 
     private var items: List<Entry> = emptyList()
     private var live = false
+    private var seriesKey: String? = null
     private var resumeIndex = 0
     private var resumePosition = C.TIME_UNSET
+
+    /** Índice, posição e duração do item atual, guardados para salvar o progresso. */
+    private var currentIndex = -1
+    private var lastPosition = 0L
+    private var lastDuration = 0L
+
+    /** Tecla tratada aqui no ACTION_DOWN; o ACTION_UP dela também fica aqui. */
+    private var consumedKey = KeyEvent.KEYCODE_UNKNOWN
 
     /** Cabeçalhos extras no formato "link|User-Agent=...&Referer=...". */
     private val headers = HashMap<String, Map<String, String>>()
@@ -50,11 +74,13 @@ class PlayerActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         items = PlayerQueue.items
         live = PlayerQueue.live
+        seriesKey = PlayerQueue.seriesKey
         if (items.isEmpty()) {
             finish()
             return
         }
         resumeIndex = (savedInstanceState?.getInt(KEY_INDEX) ?: PlayerQueue.start).coerceIn(items.indices)
+        savedInstanceState?.getLong(KEY_POSITION, C.TIME_UNSET)?.let { resumePosition = it }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_player)
 
@@ -87,6 +113,7 @@ class PlayerActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putInt(KEY_INDEX, player?.currentMediaItemIndex ?: resumeIndex)
+        outState.putLong(KEY_POSITION, if (live) C.TIME_UNSET else player?.currentPosition ?: resumePosition)
     }
 
     private fun initPlayer() {
@@ -98,25 +125,67 @@ class PlayerActivity : AppCompatActivity() {
 
         val p = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSource))
+            .setSeekBackIncrementMs(SEEK_STEP_MS)
+            .setSeekForwardIncrementMs(SEEK_FORWARD_BUTTON_MS)
             .build()
         // No ao vivo, se a conexão cair, o canal reconecta em vez de pular para o próximo.
         if (live) p.repeatMode = Player.REPEAT_MODE_ONE
+
+        var start = if (live) C.TIME_UNSET else resumePosition
+        if (!live && start == C.TIME_UNSET) {
+            UserData.resumePosition(items[resumeIndex].key)?.let {
+                start = it
+                Toast.makeText(this, "Continuando de ${UserData.formatTime(it)}", Toast.LENGTH_LONG).show()
+            }
+        }
+
+        currentIndex = resumeIndex
+        lastPosition = 0
+        lastDuration = 0
         p.addListener(listener)
-        p.setMediaItems(items.map(::toMediaItem), resumeIndex, if (live) C.TIME_UNSET else resumePosition)
+        p.setMediaItems(items.map(::toMediaItem), resumeIndex, start)
         p.prepare()
         p.playWhenReady = true
         playerView.player = p
+        playerView.requestFocus()
         player = p
-        showInfo()
+        recordWatch(resumeIndex)
+        showInfo(withHelp = true)
+        if (!live) handler.postDelayed(tick, PROGRESS_INTERVAL_MS)
     }
 
     private fun releasePlayer() {
         val p = player ?: return
+        handler.removeCallbacks(tick)
+        trackProgress(save = true)
         resumeIndex = p.currentMediaItemIndex
         resumePosition = if (live) C.TIME_UNSET else p.currentPosition
         playerView.player = null
         p.release()
         player = null
+    }
+
+    // ---- progresso e histórico ----
+
+    private fun trackProgress(save: Boolean) {
+        val p = player ?: return
+        if (live || p.currentMediaItemIndex != currentIndex) return
+        val duration = p.duration
+        if (duration == C.TIME_UNSET || duration <= 0) return
+        lastPosition = p.currentPosition
+        lastDuration = duration
+        if (save) items.getOrNull(currentIndex)?.let { UserData.saveProgress(it.key, lastPosition, lastDuration) }
+    }
+
+    private fun recordWatch(index: Int) {
+        val entry = items.getOrNull(index) ?: return
+        val series = seriesKey
+        if (series != null) {
+            UserData.recordWatch(series)
+            UserData.setLastEpisode(series, entry.key)
+        } else {
+            UserData.recordWatch(entry.key)
+        }
     }
 
     private fun toMediaItem(entry: Entry): MediaItem {
@@ -138,8 +207,24 @@ class PlayerActivity : AppCompatActivity() {
 
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            val p = player ?: return
+            val previous = items.getOrNull(currentIndex)
+            // O episódio anterior acabou sozinho: conta como visto.
+            if (!live && previous != null && lastDuration > 0) {
+                val position = if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) lastDuration else lastPosition
+                UserData.saveProgress(previous.key, position, lastDuration)
+            }
+            currentIndex = p.currentMediaItemIndex
+            lastPosition = 0
+            lastDuration = 0
+            if (!live) {
+                items.getOrNull(currentIndex)?.let { entry ->
+                    UserData.resumePosition(entry.key)?.let { p.seekTo(it) }
+                }
+            }
+            recordWatch(currentIndex)
             error.isVisible = false
-            showInfo()
+            showInfo(withHelp = false)
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -160,39 +245,101 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun showInfo() {
+    private fun showInfo(withHelp: Boolean) {
         val p = player ?: return
-        val entry = items.getOrNull(p.currentMediaItemIndex) ?: return
-        info.text = if (live) "${p.currentMediaItemIndex + 1}. ${entry.name}\n${entry.group}" else entry.name
+        val index = p.currentMediaItemIndex
+        val entry = items.getOrNull(index) ?: return
+        val title = if (live) "${index + 1}. ${entry.name}\n${entry.group}" else entry.name
+        val help = when {
+            !withHelp -> ""
+            live -> "\n\nCima/baixo: trocar de canal"
+            else -> "\n\nOK: pausar  ·  Esquerda/direita: voltar/avançar"
+        }
+        info.text = title + help
         info.isVisible = true
         handler.removeCallbacks(hideInfo)
-        handler.postDelayed(hideInfo, 4000)
+        handler.postDelayed(hideInfo, if (withHelp) 6000L else 4000L)
     }
 
+    // ---- teclas ----
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        val p = player
-        if (p != null && event.action == KeyEvent.ACTION_DOWN) {
-            val code = event.keyCode
-            if (error.isVisible && (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER)) {
-                error.isVisible = false
-                p.prepare()
-                p.play()
+        val p = player ?: return super.dispatchKeyEvent(event)
+        val code = event.keyCode
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> if (handleKey(p, code, event.repeatCount)) {
+                consumedKey = code
                 return true
             }
-            if (live && !playerView.isControllerFullyVisible) {
-                when (code) {
-                    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> {
-                        zap(1)
-                        return true
-                    }
-                    KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> {
-                        zap(-1)
-                        return true
-                    }
-                }
+            KeyEvent.ACTION_UP -> if (code == consumedKey) {
+                consumedKey = KeyEvent.KEYCODE_UNKNOWN
+                return true
             }
         }
         return super.dispatchKeyEvent(event)
+    }
+
+    private fun handleKey(p: ExoPlayer, code: Int, repeat: Int): Boolean {
+        val controlsVisible = playerView.isControllerFullyVisible
+
+        if (error.isVisible && code in OK_KEYS) {
+            error.isVisible = false
+            p.prepare()
+            p.play()
+            return true
+        }
+
+        when (code) {
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> return togglePause(p)
+            KeyEvent.KEYCODE_MEDIA_PLAY -> { p.play(); return true }
+            KeyEvent.KEYCODE_MEDIA_PAUSE -> { p.pause(); playerView.showController(); return true }
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> return live || seek(p, SEEK_FORWARD_BUTTON_MS)
+            KeyEvent.KEYCODE_MEDIA_REWIND -> return live || seek(p, -SEEK_STEP_MS)
+            KeyEvent.KEYCODE_BACK -> if (controlsVisible) { playerView.hideController(); return true }
+        }
+
+        // Com a barra visível, o controle navega pelos botões dela.
+        if (controlsVisible) return false
+
+        if (live) {
+            when (code) {
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> { zap(1); return true }
+                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> { zap(-1); return true }
+                in OK_KEYS -> { playerView.showController(); return true }
+            }
+            return false
+        }
+
+        return when (code) {
+            in OK_KEYS -> togglePause(p)
+            KeyEvent.KEYCODE_DPAD_LEFT -> seek(p, -stepFor(repeat))
+            KeyEvent.KEYCODE_DPAD_RIGHT -> seek(p, stepFor(repeat))
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> { playerView.showController(); true }
+            else -> false
+        }
+    }
+
+    /** Segurar a seta acelera: 10 s, depois 30 s, depois 1 min por toque. */
+    private fun stepFor(repeat: Int) = when {
+        repeat < 5 -> SEEK_STEP_MS
+        repeat < 15 -> 30_000L
+        else -> 60_000L
+    }
+
+    private fun togglePause(p: ExoPlayer): Boolean {
+        if (p.isPlaying) p.pause() else p.play()
+        playerView.showController()
+        return true
+    }
+
+    private fun seek(p: ExoPlayer, delta: Long): Boolean {
+        if (!p.isCurrentMediaItemSeekable) return true
+        val duration = p.duration
+        var target = (p.currentPosition + delta).coerceAtLeast(0)
+        if (duration != C.TIME_UNSET && duration > 0) target = target.coerceAtMost(duration - 1000)
+        p.seekTo(target)
+        playerView.showController()
+        return true
     }
 
     private fun zap(delta: Int) {
@@ -208,5 +355,14 @@ class PlayerActivity : AppCompatActivity() {
 
     companion object {
         private const val KEY_INDEX = "index"
+        private const val KEY_POSITION = "position"
+        private const val SEEK_STEP_MS = 10_000L
+        private const val SEEK_FORWARD_BUTTON_MS = 30_000L
+        private const val PROGRESS_INTERVAL_MS = 10_000L
+        private val OK_KEYS = setOf(
+            KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER,
+        )
     }
 }

@@ -33,6 +33,13 @@ class TextListAdapter(
         notifyDataSetChanged()
     }
 
+    /** Troca os textos sem recriar as linhas, para o foco do controle não se perder. */
+    fun refresh(list: List<String>) {
+        if (list.size != items.size) return submit(list, selectedIndex)
+        items = list
+        notifyItemRangeChanged(0, list.size)
+    }
+
     fun select(index: Int) {
         val old = selectedIndex
         selectedIndex = index
@@ -61,7 +68,10 @@ class TextListAdapter(
 data class GridItem(val title: String, val image: String?)
 
 /** Grade de canais (logo ao lado do nome) ou de capas (filmes e séries). */
-class GridAdapter(private val onClick: (Int) -> Unit) : RecyclerView.Adapter<GridAdapter.Holder>() {
+class GridAdapter(
+    private val onClick: (Int) -> Unit,
+    private val onLongClick: (Int) -> Unit,
+) : RecyclerView.Adapter<GridAdapter.Holder>() {
 
     class Holder(view: View) : RecyclerView.ViewHolder(view) {
         val image: ImageView = view.findViewById(R.id.image)
@@ -86,6 +96,19 @@ class GridAdapter(private val onClick: (Int) -> Unit) : RecyclerView.Adapter<Gri
         val view = LayoutInflater.from(parent.context).inflate(layout, parent, false)
         val holder = Holder(view)
         view.setOnClickListener { holder.withPosition(onClick) }
+        // Segurar o OK do controle gera um clique longo.
+        view.setOnLongClickListener {
+            holder.withPosition(onLongClick)
+            true
+        }
+        view.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == android.view.KeyEvent.KEYCODE_MENU && event.action == android.view.KeyEvent.ACTION_UP) {
+                holder.withPosition(onLongClick)
+                true
+            } else {
+                false
+            }
+        }
         view.setOnFocusChangeListener { v, hasFocus ->
             val scale = if (hasFocus) 1.06f else 1f
             v.animate().scaleX(scale).scaleY(scale).setDuration(120).start()

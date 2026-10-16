@@ -9,9 +9,14 @@ object PlayerQueue {
     var live: Boolean = false
         private set
 
-    fun set(items: List<Entry>, start: Int, live: Boolean) {
+    /** Quando a lista é de episódios, o histórico guarda a série e não o episódio. */
+    var seriesKey: String? = null
+        private set
+
+    fun set(items: List<Entry>, start: Int, live: Boolean, seriesKey: String? = null) {
         this.items = items
         this.start = start
         this.live = live
+        this.seriesKey = seriesKey
     }
 }

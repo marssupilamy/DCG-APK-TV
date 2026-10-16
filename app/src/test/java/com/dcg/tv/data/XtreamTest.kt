@@ -45,6 +45,7 @@ class XtreamTest {
         assertEquals(listOf("Abertos", "Esportes", M3uParser.NO_GROUP), result.map { it.name })
         val globo = result[0].items.single()
         assertEquals("http://srv.com/live/user/pass/10.ts", globo.url)
+        assertEquals("live:10", globo.key)
         assertEquals("http://img/g.png", globo.logo)
         assertNull(result[1].items.single().logo)
     }
@@ -73,6 +74,8 @@ class XtreamTest {
         assertEquals(listOf("BB S01E01", "BB S01E02", "BB S02E01"), episodes.map { it.name })
         assertEquals("http://srv.com/series/user/pass/2001.mkv", episodes[2].url)
         assertEquals(1, episodes[0].season)
+        assertEquals("ep:1001", episodes[0].key)
+        assertEquals("series:900", series.key)
     }
 
     @Test

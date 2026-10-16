@@ -19,8 +19,21 @@ Os grupos da lista viram as categorias da coluna da esquerda.
 - DNS seguro próprio (Cloudflare e Google), para funcionar mesmo quando o provedor de internet bloqueia os endereços.
 - A lista fica salva no aparelho e é atualizada a cada 12 horas, ou pelo botão **Atualizar**.
 - Busca por nome dentro da aba aberta.
-- No ao vivo, as setas cima e baixo do controle trocam de canal.
-- Séries passam para o próximo episódio sozinhas.
+- Favoritos e vistos recentemente no topo de cada aba. Para favoritar, segure o OK sobre o item (ou aperte o botão de menu).
+- Filmes e episódios continuam de onde pararam. Na série, cada episódio mostra "visto" ou "parou em".
+- Abre na hora com a cópia salva e baixa a versão nova em segundo plano quando ela tem mais de 12 horas.
+
+## Controle remoto no player
+
+| Tecla | Filmes e séries | TV ao vivo |
+|---|---|---|
+| OK | pausa e retoma | mostra a barra de controles |
+| Esquerda / direita | volta / avança 10 s (segurar acelera) | mostra a barra de controles |
+| Cima / baixo | mostra a barra de controles | troca de canal |
+| Play/pause, avançar, voltar | funcionam normalmente | play/pause |
+| Voltar | fecha a barra; se ela estiver fechada, sai do player | sai do player |
+
+Séries passam para o próximo episódio sozinhas.
 
 ## Instalação no Fire TV Stick
 

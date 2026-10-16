@@ -11,6 +11,8 @@ data class Entry(
     val seriesName: String? = null,
     val season: Int = 0,
     val episode: Int = 0,
+    /** Identificador estável, usado em favoritos, histórico e "continuar assistindo". */
+    val key: String = url,
 )
 
 data class Series(
@@ -23,6 +25,9 @@ data class Series(
     val xtreamId: String? = null,
 ) {
     val seasons: List<Int> get() = episodes.map { it.season }.distinct().sorted()
+
+    val key: String
+        get() = if (xtreamId != null) "series:$xtreamId" else "series:$group/${name.lowercase()}"
 }
 
 data class Category<T>(val name: String, val items: List<T>)
@@ -33,6 +38,17 @@ class Library(
     val series: List<Category<Series>>,
 ) {
     val seriesById: Map<Int, Series> = series.flatMap { it.items }.associateBy { it.id }
+
+    val entriesByKey: Map<String, Entry> by lazy {
+        HashMap<String, Entry>().also { map ->
+            live.forEach { c -> c.items.forEach { map.putIfAbsent(it.key, it) } }
+            movies.forEach { c -> c.items.forEach { map.putIfAbsent(it.key, it) } }
+        }
+    }
+
+    val seriesByKey: Map<String, Series> by lazy {
+        HashMap<String, Series>().also { map -> seriesById.values.forEach { map.putIfAbsent(it.key, it) } }
+    }
 
     val liveCount get() = live.sumOf { it.items.size }
     val movieCount get() = movies.sumOf { it.items.size }

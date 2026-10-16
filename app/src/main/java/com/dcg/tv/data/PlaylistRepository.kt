@@ -3,6 +3,11 @@ package com.dcg.tv.data
 import android.content.Context
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
@@ -37,7 +42,8 @@ object PlaylistRepository {
 
     private val episodeCache = ConcurrentHashMap<String, List<Entry>>()
 
-    class LoadResult(val library: Library, val warning: String?)
+    /** [stale] indica que a cópia salva é antiga e vale baixar de novo em segundo plano. */
+    class LoadResult(val library: Library, val warning: String?, val stale: Boolean)
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -88,33 +94,31 @@ object PlaylistRepository {
         library = null
     }
 
+    fun cacheAgeMs(ctx: Context) = System.currentTimeMillis() - prefs(ctx).getLong(KEY_TIME, 0)
+
+    private fun hasCache(ctx: Context, source: Source) = when (source) {
+        is Source.M3u -> m3uFile(ctx).exists()
+        is Source.Xtream -> XTREAM_FILES.all { xtFile(ctx, it).exists() } && prefs(ctx).contains(KEY_ACTIVE)
+    }
+
     /**
-     * Baixa o conteúdo quando a cópia salva tem mais de 12 horas ou quando [force] é verdadeiro.
+     * Baixa o conteúdo quando não há cópia salva ou quando [force] é verdadeiro.
+     * Com cópia salva, abre na hora e avisa em [LoadResult.stale] se ela tem mais de 12 horas.
      * [progress] recebe frases curtas sobre a etapa atual.
      */
     suspend fun load(ctx: Context, force: Boolean, progress: (String) -> Unit = {}): LoadResult =
         withContext(Dispatchers.IO) {
             val source = getSource(ctx) ?: throw IOException("Nenhuma lista configurada")
-            val age = System.currentTimeMillis() - prefs(ctx).getLong(KEY_TIME, 0)
-            val hasCache = when (source) {
-                is Source.M3u -> m3uFile(ctx).exists()
-                is Source.Xtream -> XTREAM_FILES.all { xtFile(ctx, it).exists() } && prefs(ctx).contains(KEY_ACTIVE)
-            }
+            val cached = hasCache(ctx, source)
             var warning: String? = null
+            var downloaded = false
 
-            if (force || !hasCache || age > MAX_AGE_MS) {
+            if (force || !cached) {
                 try {
-                    when (source) {
-                        is Source.M3u -> {
-                            progress("Baixando a lista…")
-                            Net.download(source.url, m3uFile(ctx), Net.PLAYER_USER_AGENT)
-                        }
-                        is Source.Xtream -> downloadXtream(ctx, source.account, progress)
-                    }
-                    prefs(ctx).edit().putLong(KEY_TIME, System.currentTimeMillis()).apply()
-                    episodeCache.clear()
+                    downloadFiles(ctx, source, progress)
+                    downloaded = true
                 } catch (e: Exception) {
-                    if (!hasCache) throw e
+                    if (!cached) throw e
                     warning = "Não foi possível atualizar (${Net.describe(e)}). Exibindo a última versão salva."
                 }
             }
@@ -125,25 +129,50 @@ object PlaylistRepository {
                 is Source.Xtream -> readXtream(ctx, source.account)
             }
             library = lib
-            LoadResult(lib, warning)
+            LoadResult(lib, warning, stale = !downloaded && cacheAgeMs(ctx) > MAX_AGE_MS)
         }
 
-    private fun downloadXtream(ctx: Context, account: XtreamAccount, progress: (String) -> Unit) {
+    /** Baixa só os arquivos, sem trocar o que está na tela. A novidade aparece no próximo carregamento. */
+    suspend fun refreshFiles(ctx: Context) = withContext(Dispatchers.IO) {
+        val source = getSource(ctx) ?: return@withContext
+        downloadFiles(ctx, source) {}
+    }
+
+    private val downloadLock = Mutex()
+
+    private suspend fun downloadFiles(ctx: Context, source: Source, progress: (String) -> Unit) = downloadLock.withLock {
+        when (source) {
+            is Source.M3u -> {
+                progress("Baixando a lista…")
+                Net.download(source.url, m3uFile(ctx), Net.PLAYER_USER_AGENT)
+            }
+            is Source.Xtream -> downloadXtream(ctx, source.account, progress)
+        }
+        prefs(ctx).edit().putLong(KEY_TIME, System.currentTimeMillis()).apply()
+        episodeCache.clear()
+    }
+
+    private suspend fun downloadXtream(ctx: Context, account: XtreamAccount, progress: (String) -> Unit) {
         progress("Conectando ao servidor…")
         val login = Xtream.login(account, prefs(ctx).getString(KEY_ACTIVE, null))
         val steps = listOf(
-            Triple("live_cats", "get_live_categories", "Baixando categorias de TV…"),
-            Triple("live", "get_live_streams", "Baixando canais…"),
-            Triple("vod_cats", "get_vod_categories", "Baixando categorias de filmes…"),
-            Triple("vod", "get_vod_streams", "Baixando filmes…"),
-            Triple("series_cats", "get_series_categories", "Baixando categorias de séries…"),
-            Triple("series", "get_series", "Baixando séries…"),
+            "live_cats" to "get_live_categories",
+            "live" to "get_live_streams",
+            "vod_cats" to "get_vod_categories",
+            "vod" to "get_vod_streams",
+            "series_cats" to "get_series_categories",
+            "series" to "get_series",
         )
-        val tmp = steps.map { (name, action, message) ->
-            progress(message)
-            val file = File(ctx.filesDir, "xt_$name.new")
-            Net.download(account.apiUrl(login.server, action), file)
-            file
+        progress("Baixando canais, filmes e séries…")
+        // Os seis pedidos vão ao mesmo tempo.
+        val tmp = coroutineScope {
+            steps.map { (name, action) ->
+                async(Dispatchers.IO) {
+                    val file = File(ctx.filesDir, "xt_$name.new")
+                    Net.download(account.apiUrl(login.server, action), file)
+                    file
+                }
+            }.awaitAll()
         }
         // Só troca os arquivos depois que todos chegaram.
         steps.zip(tmp).forEach { (step, file) ->
@@ -159,22 +188,29 @@ object PlaylistRepository {
             .apply()
     }
 
-    private fun readXtream(ctx: Context, account: XtreamAccount): Library {
+    private suspend fun readXtream(ctx: Context, account: XtreamAccount): Library = coroutineScope {
         val p = prefs(ctx)
         val server = p.getString(KEY_ACTIVE, null) ?: account.servers.first()
         val liveExt = p.getString(KEY_LIVE_EXT, null) ?: "ts"
         fun open(name: String) = xtFile(ctx, name).bufferedReader()
 
-        val live = open("live_cats").use { cats ->
-            open("live").use { Xtream.readStreams(cats, it, Kind.LIVE, { id, ext -> account.liveUrl(server, id, ext) }, liveExt) }
+        // As três partes são lidas ao mesmo tempo.
+        val live = async {
+            open("live_cats").use { cats ->
+                open("live").use { Xtream.readStreams(cats, it, Kind.LIVE, { id, ext -> account.liveUrl(server, id, ext) }, liveExt) }
+            }
         }
-        val movies = open("vod_cats").use { cats ->
-            open("vod").use { Xtream.readStreams(cats, it, Kind.MOVIE, { id, ext -> account.movieUrl(server, id, ext) }, "mp4") }
+        val movies = async {
+            open("vod_cats").use { cats ->
+                open("vod").use { Xtream.readStreams(cats, it, Kind.MOVIE, { id, ext -> account.movieUrl(server, id, ext) }, "mp4") }
+            }
         }
-        val series = open("series_cats").use { cats ->
-            open("series").use { Xtream.readSeries(cats, it, firstId = 0) }
+        val series = async {
+            open("series_cats").use { cats ->
+                open("series").use { Xtream.readSeries(cats, it, firstId = 0) }
+            }
         }
-        return Library(live, movies, series)
+        Library(live.await(), movies.await(), series.await())
     }
 
     /** Episódios da série. Nas contas Xtream vêm do servidor na primeira vez que a série é aberta. */

@@ -165,6 +165,7 @@ object Xtream {
                 logo = s["stream_icon"]?.takeIf { it.isNotBlank() },
                 group = group,
                 kind = kind,
+                key = (if (kind == Kind.LIVE) "live:" else "movie:") + id,
             )
             items.add(catId to entry)
         }
@@ -210,6 +211,7 @@ object Xtream {
                     seriesName = series.name,
                     season = season,
                     episode = number,
+                    key = "ep:$id",
                 )
             )
         }

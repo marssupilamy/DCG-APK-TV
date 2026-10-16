@@ -9,6 +9,7 @@ import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
@@ -25,6 +26,7 @@ import com.dcg.tv.data.Net
 import com.dcg.tv.data.PlayerQueue
 import com.dcg.tv.data.PlaylistRepository
 import com.dcg.tv.data.Series
+import com.dcg.tv.data.UserData
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -41,14 +43,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var gridLayout: GridLayoutManager
 
     private val categoryAdapter = TextListAdapter(R.layout.item_text, ::onCategoryClick, ::onCategoryFocus)
-    private val gridAdapter = GridAdapter(::onItemClick)
+    private val gridAdapter = GridAdapter(::onItemClick, ::onItemLongClick)
     private val handler = Handler(Looper.getMainLooper())
     private var pendingCategory: Runnable? = null
 
     private var section = Kind.LIVE
-    private var categoryIndex = -1
+    private var categoryIndex = NONE
     private var entries: List<Entry> = emptyList()
     private var series: List<Series> = emptyList()
+    private var shownKeys: List<String> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,7 +77,7 @@ class MainActivity : AppCompatActivity() {
 
         tabs.forEach { (kind, view) -> view.setOnClickListener { showSection(kind) } }
         findViewById<View>(R.id.btnSearch).setOnClickListener { askSearch() }
-        findViewById<View>(R.id.btnRefresh).setOnClickListener { load(force = true) }
+        findViewById<View>(R.id.btnRefresh).setOnClickListener { refresh() }
         findViewById<View>(R.id.btnSettings).setOnClickListener {
             startActivity(Intent(this, SetupActivity::class.java))
         }
@@ -94,6 +97,16 @@ class MainActivity : AppCompatActivity() {
         if (lib != null) render(lib) else load(force = false)
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Ao voltar do player, os vistos recentemente podem ter mudado.
+        if (categoryIndex == FAVORITES || categoryIndex == RECENT) {
+            val keys = virtualKeys(categoryIndex)
+            if (keys != shownKeys) showCategory(categoryIndex)
+        }
+        if (PlaylistRepository.library != null) updateCategoryNames()
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putString(KEY_SECTION, section.name)
@@ -104,17 +117,19 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    // ---- carregamento ----
+
     private fun load(force: Boolean) {
-        loadingText.text = if (force) "Atualizando a lista…" else "Carregando a lista…"
+        loadingText.text = if (force) "Atualizando…" else "Carregando…"
         loading.isVisible = true
         lifecycleScope.launch {
             try {
                 val result = PlaylistRepository.load(this@MainActivity, force) { message ->
                     runOnUiThread { loadingText.text = message }
                 }
-                status.text = result.warning.orEmpty()
-                status.isVisible = result.warning != null
+                setStatus(result.warning)
                 render(result.library)
+                if (result.stale) refreshInBackground()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -123,6 +138,30 @@ class MainActivity : AppCompatActivity() {
                 loading.isVisible = false
             }
         }
+    }
+
+    /** Baixa a versão nova sem tirar o que está na tela. */
+    private fun refreshInBackground() {
+        lifecycleScope.launch {
+            try {
+                PlaylistRepository.refreshFiles(this@MainActivity)
+                setStatus("Há uma versão nova da lista. Aperte Atualizar para ver.")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Continua com a cópia salva. Na próxima abertura tenta de novo.
+            }
+        }
+    }
+
+    /** Se a lista foi baixada há pouco, só reorganiza. Senão, baixa de novo. */
+    private fun refresh() {
+        load(force = PlaylistRepository.cacheAgeMs(this) > RECENT_DOWNLOAD_MS)
+    }
+
+    private fun setStatus(text: String?) {
+        status.text = text.orEmpty()
+        status.isVisible = text != null
     }
 
     private fun showLoadError(e: Exception) {
@@ -139,37 +178,81 @@ class MainActivity : AppCompatActivity() {
         tabs[Kind.LIVE]?.text = "TV ao Vivo (${lib.liveCount})"
         tabs[Kind.MOVIE]?.text = "Filmes (${lib.movieCount})"
         tabs[Kind.SERIES]?.text = "Séries (${lib.seriesCount})"
-        if (lib.isEmpty) {
-            status.text = "A lista não tem itens. Confira o link em Configurar."
-            status.isVisible = true
-        }
+        if (lib.isEmpty) setStatus("A lista não tem itens. Confira os dados em Configurar.")
         showSection(section)
         tabs[section]?.requestFocus()
+    }
+
+    // ---- seções e categorias ----
+
+    /** As duas primeiras linhas da coluna são Favoritos e Vistos recentemente. */
+    private fun categoryNames(lib: Library): List<String> {
+        val real = when (section) {
+            Kind.LIVE -> lib.live.map { "${it.name} (${it.items.size})" }
+            Kind.MOVIE -> lib.movies.map { "${it.name} (${it.items.size})" }
+            Kind.SERIES -> lib.series.map { "${it.name} (${it.items.size})" }
+        }
+        return listOf(
+            "Favoritos (${virtualKeys(FAVORITES).size})",
+            "Vistos recentemente (${virtualKeys(RECENT).size})",
+        ) + real
+    }
+
+    private fun updateCategoryNames() {
+        val lib = PlaylistRepository.library ?: return
+        categoryAdapter.refresh(categoryNames(lib))
     }
 
     private fun showSection(kind: Kind) {
         val lib = PlaylistRepository.library ?: return
         section = kind
         tabs.forEach { (k, v) -> v.isSelected = k == kind }
-        val names = when (kind) {
-            Kind.LIVE -> lib.live.map { "${it.name} (${it.items.size})" }
-            Kind.MOVIE -> lib.movies.map { "${it.name} (${it.items.size})" }
-            Kind.SERIES -> lib.series.map { "${it.name} (${it.items.size})" }
-        }
-        categoryAdapter.submit(names)
+        categoryAdapter.submit(categoryNames(lib))
         categories.scrollToPosition(0)
-        categoryIndex = -1
-        showCategory(0)
+        categoryIndex = NONE
+        showCategory(if (virtualKeys(RECENT).isNotEmpty()) RECENT else FIRST_REAL)
+    }
+
+    /** Chaves dos favoritos ou do histórico que pertencem à seção aberta e existem na lista atual. */
+    private fun virtualKeys(index: Int): List<String> {
+        val lib = PlaylistRepository.library ?: return emptyList()
+        val keys = if (index == FAVORITES) UserData.favoriteKeys() else UserData.historyKeys()
+        return keys.filter { key ->
+            when (section) {
+                Kind.SERIES -> key in lib.seriesByKey
+                else -> lib.entriesByKey[key]?.kind == section
+            }
+        }
     }
 
     private fun showCategory(index: Int) {
         val lib = PlaylistRepository.library ?: return
         categoryIndex = index
         categoryAdapter.select(index)
+        if (index == FAVORITES || index == RECENT) {
+            val title = if (index == FAVORITES) "Favoritos" else "Vistos recentemente"
+            val keys = virtualKeys(index)
+            shownKeys = keys
+            if (section == Kind.SERIES) {
+                showSeries(title, keys.mapNotNull { lib.seriesByKey[it] })
+            } else {
+                showEntries(title, keys.mapNotNull { lib.entriesByKey[it] })
+            }
+            if (keys.isEmpty()) {
+                empty.text = if (index == FAVORITES) {
+                    "Nenhum favorito ainda.\nSegure o OK sobre um item para favoritar."
+                } else {
+                    "Nada assistido nesta seção ainda."
+                }
+            }
+            return
+        }
+        shownKeys = emptyList()
+        val real = index - FIRST_REAL
         when (section) {
-            Kind.LIVE -> lib.live.getOrNull(index).let { showEntries(it?.name, it?.items.orEmpty()) }
-            Kind.MOVIE -> lib.movies.getOrNull(index).let { showEntries(it?.name, it?.items.orEmpty()) }
-            Kind.SERIES -> lib.series.getOrNull(index).let { showSeries(it?.name, it?.items.orEmpty()) }
+            Kind.LIVE -> lib.live.getOrNull(real).let { showEntries(it?.name, it?.items.orEmpty()) }
+            Kind.MOVIE -> lib.movies.getOrNull(real).let { showEntries(it?.name, it?.items.orEmpty()) }
+            Kind.SERIES -> lib.series.getOrNull(real).let { showSeries(it?.name, it?.items.orEmpty()) }
         }
     }
 
@@ -214,6 +297,8 @@ class MainActivity : AppCompatActivity() {
         focusFirstGridItem()
     }
 
+    // ---- itens ----
+
     private fun onItemClick(position: Int) {
         when (section) {
             Kind.LIVE -> {
@@ -230,6 +315,20 @@ class MainActivity : AppCompatActivity() {
             )
         }
     }
+
+    private fun onItemLongClick(position: Int) {
+        val (key, name) = when (section) {
+            Kind.SERIES -> series.getOrNull(position)?.let { it.key to it.name }
+            else -> entries.getOrNull(position)?.let { it.key to it.name }
+        } ?: return
+        val added = UserData.toggleFavorite(key)
+        val msg = if (added) "\"$name\" adicionado aos favoritos" else "\"$name\" removido dos favoritos"
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        updateCategoryNames()
+        if (categoryIndex == FAVORITES) showCategory(FAVORITES)
+    }
+
+    // ---- busca ----
 
     private fun askSearch() {
         if (PlaylistRepository.library == null) return
@@ -272,8 +371,9 @@ class MainActivity : AppCompatActivity() {
         val query = M3uParser.normalize(text.trim())
         if (query.isEmpty()) return
         pendingCategory?.let(handler::removeCallbacks)
-        categoryIndex = -1
-        categoryAdapter.select(-1)
+        categoryIndex = NONE
+        shownKeys = emptyList()
+        categoryAdapter.select(NONE)
         val title = "Busca: \"${text.trim()}\""
         when (section) {
             Kind.LIVE -> showEntries(title, lib.live.flatMap { it.items }.filterByName(query) { it.name })
@@ -291,5 +391,11 @@ class MainActivity : AppCompatActivity() {
         private const val CHANNEL_COLUMNS = 3
         private const val POSTER_COLUMNS = 6
         private const val MAX_RESULTS = 500
+        private const val RECENT_DOWNLOAD_MS = 5 * 60 * 1000L
+
+        private const val NONE = -1
+        private const val FAVORITES = 0
+        private const val RECENT = 1
+        private const val FIRST_REAL = 2
     }
 }
