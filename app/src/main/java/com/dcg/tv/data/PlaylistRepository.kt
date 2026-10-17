@@ -97,6 +97,7 @@ object PlaylistRepository {
         edit.apply()
         m3uFile(ctx).delete()
         XTREAM_FILES.forEach { xtFile(ctx, it).delete() }
+        guideFile(ctx).delete()
         clearCaches()
         library = null
     }
@@ -321,60 +322,64 @@ object PlaylistRepository {
 
     private var agendaCache: Pair<Long, Map<Sport, List<Game>>>? = null
 
-    /** Atualizar a agenda pede a programação de vários canais. Há um intervalo mínimo entre atualizações. */
     fun agendaAgeMs(): Long = agendaCache?.let { System.currentTimeMillis() - it.first } ?: Long.MAX_VALUE
 
+    private fun guideFile(ctx: Context) = File(ctx.filesDir, "xt_guide.xml")
+
     /**
-     * Agenda de jogos: lê a programação dos canais de esporte, poucos de cada vez e com pausa
-     * entre os pedidos, para o fornecedor não confundir com abuso e bloquear a conta.
-     * Para depois de várias falhas seguidas. [progress] recebe quantos canais já foram lidos e o total.
+     * Agenda de jogos a partir do guia XMLTV: um único download com a programação de todos
+     * os canais, guardado por 6 horas. Assim o servidor recebe um pedido só, e não um por canal.
+     * [progress] recebe frases curtas sobre a etapa atual.
      */
-    suspend fun agenda(ctx: Context, force: Boolean, progress: (Int, Int) -> Unit): Map<Sport, List<Game>> {
-        if (!force || agendaAgeMs() < AGENDA_MIN_REFRESH_MS) {
-            agendaCache?.let { (time, agenda) -> if (System.currentTimeMillis() - time < AGENDA_CACHE_MS) return agenda }
-        }
+    suspend fun agenda(ctx: Context, force: Boolean, progress: (String) -> Unit): Map<Sport, List<Game>> {
+        if (!force) agendaCache?.let { (time, agenda) -> if (System.currentTimeMillis() - time < AGENDA_CACHE_MS) return agenda }
         val lib = library ?: return emptyMap()
-        val all = lib.live.asSequence().flatMap { it.items }.filter(Sports::isSportsChannel)
-        // Canais das categorias de esporte primeiro; depois os que só têm o nome parecido.
-        val (inSportsGroup, others) = all.toList().partition { Sports.isSportsGroup(it.group) }
-        val channels = (inSportsGroup + others)
-            .distinctBy(Sports::channelKey)
-            .take(MAX_AGENDA_CHANNELS)
-        val listings = java.util.Collections.synchronizedMap(LinkedHashMap<Entry, List<Program>>())
-        val done = java.util.concurrent.atomic.AtomicInteger()
-        val failuresInRow = java.util.concurrent.atomic.AtomicInteger()
-        progress(0, channels.size)
-        withContext(Dispatchers.IO) {
-            for (chunk in channels.chunked(AGENDA_PARALLEL)) {
-                if (failuresInRow.get() >= AGENDA_MAX_FAILURES) break
-                chunk.map { channel ->
-                    async {
-                        try {
-                            listings[channel] = programs(ctx, channel, limit = AGENDA_PROGRAMS)
-                            failuresInRow.set(0)
-                        } catch (e: Exception) {
-                            failuresInRow.incrementAndGet()
-                        }
-                        progress(done.incrementAndGet(), channels.size)
-                    }
-                }.awaitAll()
-                kotlinx.coroutines.delay(AGENDA_PAUSE_MS)
+        val (account, server) = session(ctx) ?: return emptyMap()
+        return withContext(Dispatchers.IO) {
+            val file = guideFile(ctx)
+            val age = System.currentTimeMillis() - file.lastModified()
+            val needsDownload = !file.exists() || age > GUIDE_MAX_AGE_MS || (force && age > GUIDE_MIN_REFRESH_MS)
+            if (needsDownload) {
+                progress("Baixando a programação dos canais…")
+                val url = "$server/xmltv.php?username=${java.net.URLEncoder.encode(account.user, "UTF-8")}" +
+                    "&password=${java.net.URLEncoder.encode(account.pass, "UTF-8")}"
+                try {
+                    Net.download(url, file) { bytes -> progress("Baixando a programação dos canais… ${bytes / (1024 * 1024)} MB") }
+                } catch (e: Exception) {
+                    if (!file.exists()) throw IOException("o fornecedor não liberou o guia de programação (${Net.describe(e)})")
+                }
             }
+
+            progress("Procurando jogos na programação…")
+            // Canais por id do guia. Variações do mesmo canal (HD, FHD) contam uma vez.
+            val byGuideId = HashMap<String, MutableList<Entry>>()
+            for (entry in lib.live.asSequence().flatMap { it.items }) {
+                val id = entry.epgId ?: continue
+                val list = byGuideId.getOrPut(id) { ArrayList() }
+                if (list.size < MAX_CHANNELS_PER_GAME && list.none { Sports.channelKey(it) == Sports.channelKey(entry) }) list.add(entry)
+            }
+            val now = System.currentTimeMillis()
+            val programs = file.bufferedReader().use { reader ->
+                val parser = android.util.Xml.newPullParser()
+                parser.setInput(reader)
+                Xmltv.read(parser, now, now + AGENDA_HOURS * 3_600_000L) { channelId, program ->
+                    channelId in byGuideId && Sports.classify(program) != null
+                }
+            }
+            val listings = LinkedHashMap<Entry, List<Program>>()
+            for ((guideId, list) in programs) {
+                byGuideId[guideId]?.forEach { channel -> listings[channel] = list }
+            }
+            val agenda = Sports.buildAgenda(listings, now, AGENDA_HOURS)
+            agendaCache = System.currentTimeMillis() to agenda
+            agenda
         }
-        if (listings.isEmpty() && failuresInRow.get() >= AGENDA_MAX_FAILURES) {
-            throw IOException("o servidor parou de responder à programação. Espere alguns minutos e tente de novo")
-        }
-        val agenda = Sports.buildAgenda(LinkedHashMap(listings), System.currentTimeMillis())
-        agendaCache = System.currentTimeMillis() to agenda
-        return agenda
     }
 
     private const val EPG_CACHE_MS = 15 * 60 * 1000L
     private const val AGENDA_CACHE_MS = 30 * 60 * 1000L
-    private const val MAX_AGENDA_CHANNELS = 60
-    private const val AGENDA_PARALLEL = 2
-    private const val AGENDA_PAUSE_MS = 250L
-    private const val AGENDA_MAX_FAILURES = 6
-    private const val AGENDA_PROGRAMS = 20
-    private const val AGENDA_MIN_REFRESH_MS = 10 * 60 * 1000L
+    private const val GUIDE_MAX_AGE_MS = 6 * 60 * 60 * 1000L
+    private const val GUIDE_MIN_REFRESH_MS = 30 * 60 * 1000L
+    private const val AGENDA_HOURS = 36
+    private const val MAX_CHANNELS_PER_GAME = 4
 }

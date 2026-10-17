@@ -95,12 +95,28 @@ object Net {
             response.body?.string() ?: ""
         }
 
-    fun download(url: String, dest: File, userAgent: String = apiUserAgent) {
+    fun download(url: String, dest: File, userAgent: String = apiUserAgent, onBytes: (Long) -> Unit = {}) {
         call(url, userAgent).use { response ->
             if (!response.isSuccessful) throw HttpStatusException(response.code)
             val body = response.body ?: throw IOException("resposta vazia")
             val tmp = File(dest.parentFile, dest.name + ".tmp")
-            body.byteStream().use { input -> tmp.outputStream().use { input.copyTo(it, 64 * 1024) } }
+            body.byteStream().use { input ->
+                tmp.outputStream().use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var total = 0L
+                    var reported = 0L
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        output.write(buffer, 0, read)
+                        total += read
+                        if (total - reported >= 512 * 1024) {
+                            reported = total
+                            onBytes(total)
+                        }
+                    }
+                }
+            }
             if (!tmp.renameTo(dest)) {
                 tmp.copyTo(dest, overwrite = true)
                 tmp.delete()

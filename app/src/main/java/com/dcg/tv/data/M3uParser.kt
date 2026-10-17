@@ -68,7 +68,7 @@ object M3uParser {
             val (series, season, episode) = parseEpisode(title)
             return Entry(title, url, logo, group, kind, series, season, episode)
         }
-        return Entry(title, url, logo, group, kind)
+        return Entry(title, url, logo, group, kind, epgId = attrs["tvg-id"]?.trim()?.takeIf { it.isNotEmpty() })
     }
 
     /** O título fica depois da primeira vírgula que não está entre aspas. */

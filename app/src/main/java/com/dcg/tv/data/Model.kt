@@ -13,6 +13,8 @@ data class Entry(
     val episode: Int = 0,
     /** Identificador estável, usado em favoritos, histórico e "continuar assistindo". */
     val key: String = url,
+    /** Identificador do canal no guia de programação (epg_channel_id ou tvg-id). */
+    val epgId: String? = null,
 )
 
 data class Series(

@@ -154,7 +154,7 @@ object Xtream {
         return result
     }
 
-    private val STREAM_KEYS = setOf("name", "stream_id", "stream_icon", "category_id", "container_extension")
+    private val STREAM_KEYS = setOf("name", "stream_id", "stream_icon", "category_id", "container_extension", "epg_channel_id")
     private val SERIES_KEYS = setOf("name", "series_id", "cover", "category_id")
 
     /** Agrupa os itens pela ordem das categorias do servidor. Categorias vazias somem. */
@@ -191,6 +191,7 @@ object Xtream {
                 group = group,
                 kind = kind,
                 key = (if (kind == Kind.LIVE) "live:" else "movie:") + id,
+                epgId = s["epg_channel_id"]?.trim()?.takeIf { it.isNotEmpty() && kind == Kind.LIVE },
             )
             items.add(catId to entry)
         }

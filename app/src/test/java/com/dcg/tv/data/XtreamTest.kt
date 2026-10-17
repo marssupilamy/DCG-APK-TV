@@ -37,7 +37,7 @@ class XtreamTest {
     fun agrupaCanaisPorCategoria() {
         val cats = """[{"category_id":"1","category_name":"Abertos","parent_id":0},{"category_id":2,"category_name":"Esportes"},{"category_id":"3","category_name":"Vazia"}]"""
         val streams = """[
-            {"num":1,"name":"Globo","stream_type":"live","stream_id":10,"stream_icon":"http://img/g.png","category_id":"1","tv_archive":0,"extra":{"a":[1,2]}},
+            {"num":1,"name":"Globo","stream_type":"live","stream_id":10,"stream_icon":"http://img/g.png","category_id":"1","tv_archive":0,"extra":{"a":[1,2]},"epg_channel_id":"globo.br"},
             {"num":2,"name":"ESPN","stream_id":"11","stream_icon":"","category_id":"2"},
             {"num":3,"name":"Perdido","stream_id":12,"category_id":"99"}
         ]"""
@@ -46,6 +46,8 @@ class XtreamTest {
         val globo = result[0].items.single()
         assertEquals("http://srv.com/live/user/pass/10.ts", globo.url)
         assertEquals("live:10", globo.key)
+        assertEquals("globo.br", globo.epgId)
+        assertNull(result[1].items.single().epgId)
         assertEquals("http://img/g.png", globo.logo)
         assertNull(result[1].items.single().logo)
     }

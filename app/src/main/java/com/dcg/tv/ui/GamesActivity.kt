@@ -23,7 +23,7 @@ import com.dcg.tv.data.Sports
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
-/** Agenda de jogos montada com a programação dos canais de esporte, separada por esporte. */
+/** Agenda de jogos montada com o guia de programação de todos os canais, separada por esporte. */
 class GamesActivity : AppCompatActivity() {
 
     private lateinit var status: TextView
@@ -81,17 +81,17 @@ class GamesActivity : AppCompatActivity() {
 
     private fun load(force: Boolean) {
         if (!PlaylistRepository.hasXtream(this)) return
-        showMessage("Buscando a programação dos canais de esporte…")
+        showMessage("Carregando a agenda…")
         lifecycleScope.launch {
             try {
-                agenda = PlaylistRepository.agenda(this@GamesActivity, force) { done, total ->
-                    runOnUiThread { showMessage("Buscando a programação dos canais de esporte… ($done de $total)") }
+                agenda = PlaylistRepository.agenda(this@GamesActivity, force) { text ->
+                    runOnUiThread { showMessage(text) }
                 }
                 render()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                showMessage("Não foi possível montar a agenda.\n${com.dcg.tv.data.Net.describe(e)}")
+                showMessage("Não foi possível montar a agenda.\n${com.dcg.tv.data.Net.describe(e).replaceFirstChar { it.uppercase() }}.")
             }
         }
     }
@@ -101,7 +101,7 @@ class GamesActivity : AppCompatActivity() {
         if (sports.isEmpty()) {
             showMessage(
                 "Nenhum jogo encontrado nas próximas 36 horas.\n\n" +
-                    "Isso acontece quando o fornecedor não envia a programação dos canais de esporte."
+                    "Isso acontece quando o guia de programação do fornecedor não traz os jogos ou os canais não têm guia."
             )
             status.text = ""
             return

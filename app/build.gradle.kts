@@ -69,4 +69,5 @@ dependencies {
     implementation("io.coil-kt:coil:2.7.0")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("net.sf.kxml:kxml2:2.3.0")
 }
